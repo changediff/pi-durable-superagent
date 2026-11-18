@@ -74,7 +74,8 @@ export const AllowedSchema = z.object({ id: z.string().trim().min(1).max(200), n
 const Weak = z.enum(['inferred', 'ignore'])
 export const AdmissionRowSchema: z.ZodType<AdmissionRow> = z.object({ listedUnaddressed: Weak.optional(), unlistedAddressed: z.enum(['explicit', 'inferred', 'ignore']).optional(), unlistedUnaddressed: Weak.optional() }).strict()
 export const AdmissionTableSchema = z.record(z.string(), AdmissionRowSchema)
-export const SourcePolicySchema = z.object({ allowed: z.array(AllowedSchema).default([]), admission: AdmissionTableSchema.default({}) }).catchall(z.unknown())
+/** `allowAll` is the pi-port convenience for a bot that may be addressed by anyone in the tailnet/tenant: every human sender is treated as listed. */
+export const SourcePolicySchema = z.object({ allowed: z.array(AllowedSchema).default([]), allowAll: z.boolean().default(false), admission: AdmissionTableSchema.default({}) }).catchall(z.unknown())
 export type SourcePolicy = z.infer<typeof SourcePolicySchema>
 export const PolicyConfigSchema = z.object({
   rules: z.array(RuleSchema).refine(rules => new Set(rules.map(rule => rule.id)).size === rules.length, 'Duplicate rule IDs').default(DEFAULT_RULES),
@@ -191,6 +192,7 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
     gate(trigger: Trigger, thread, tickets) {
       if (!trigger.human) return machineGate(trigger)
       const allowed = allowedSender(settings, trigger.actor)
+        ?? (settings.policy.sources[trigger.actor.source]?.allowAll ? { id: trigger.actor.id, name: trigger.actor.id } : undefined)
       const scope = listened(sources, trigger.source, trigger.meta)
       const row = scope.listened ? scope.row : undefined
       const recorded = { source: trigger.source, scope: trigger.meta, ...row === undefined ? {} : { row }, ...allowed ? { sender: senderName(allowed) } : {} }

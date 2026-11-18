@@ -1,0 +1,11 @@
+node_modules
+.git
+tests
+docs
+examples
+prompts
+skills
+locale
+cordis.patch.yml
+pnpm-lock.yaml
+*.log

@@ -1,3 +1,11 @@
+# pi-durable-superagent (fork of dsh-superagent)
+
+> **This branch (`feat/pi-durable-port`) is the pi-durable port, not the DSH bundle.**
+> The Router/Worker domain is unchanged; the DSH runtime, web panel and GitHub source are replaced by
+> `@earendil-works/pi-durable` + a Feishu WebSocket source + GLM-5.3. Read
+> [docs/pi-durable-port.md](docs/pi-durable-port.md) for the mapping, env table, deploy and limits.
+> The original upstream README follows for context.
+
 # dsh-superagent
 
 > **Research prototype for reference only, not an official DeepSeek product.** This code grew out of our team's day-to-day development work, with much of the engineering done by coding agents. Treat it as research code, not production-ready software. It may still contain bugs, and its coding style and engineering practices may be inconsistent. Review and adapt it before using it in your own environment.
