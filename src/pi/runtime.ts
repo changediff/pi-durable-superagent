@@ -1,26 +1,27 @@
 /**
- * Composition root of the pi-durable port.
+ * Thin host of the pi-durable super-agent port.
  *
- * DSH's `Runtime` was a Cordis Service that mounted the web panel, session controller, workspace registry
- * and tool surface. The port needs none of that: it opens the same SQLite domain store, wires the same
- * Engine with pi-durable adapters (GLM assessor, durable worker executor, Feishu outbox/source), and runs
- * two-second passes. Everything the panel used to show is in `docker logs` and the SQLite file.
+ * The domain (Engine, Store, Effects, Passes, outbox, assessor, durable workers) now lives in the
+ * `superagent` plugin (`src/plugin`), installable into any pi-durable Harness. What is left here
+ * is host wiring: build the registry (CodingTools + the plugin), open one harness on the JSONL
+ * storage with the GLM models and the Node environment, keep the Feishu WebSocket source for
+ * inbound triggers and delivery, and feed triggers into the plugin. Everything the panel used to
+ * show is in `docker logs` and the SQLite file.
  */
-import { mkdirSync } from 'node:fs'
+import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import { lockSync } from 'proper-lockfile'
-import { Engine, type Trigger } from '../core/index.ts'
-import { settingsPolicy } from '../policy.ts'
-import { Store } from '../app/store.ts'
-import { Effects } from '../app/effects.ts'
-import { Passes } from '../app/passes.ts'
+import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context'
+import { Harness, createRegistry } from '@earendil-works/pi-durable'
+import { CodingTools } from '@earendil-works/pi-durable/tools'
+import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node'
+import { openNodeJsonlStorage } from '@earendil-works/pi-durable/storage/jsonl/node'
+import type { Trigger } from '../core/index.ts'
 import { HealthBoard } from '../infra/health.ts'
+import { createSuperagentExtension, type SuperagentPlugin } from '../plugin/index.ts'
 import type { Config } from './config.ts'
 import { FeishuSource } from './feishu.ts'
 import type { ChannelPort } from './channel.ts'
-import { FeishuOutbox } from './outbox.ts'
-import { GlmAssessor } from './assessor.ts'
-import { PiExecutor } from './executor.ts'
+import { buildModels } from './models.ts'
 
 export interface RuntimeOptions {
   log?: (message: string, detail?: unknown) => void
@@ -29,148 +30,73 @@ export interface RuntimeOptions {
 }
 
 export class PiSuperagentRuntime {
-  readonly store: Store
+  readonly plugin: SuperagentPlugin
   readonly channel: ChannelPort
-  readonly effects: Effects
-  readonly engine: Engine
-  readonly executor: PiExecutor
-  readonly outbox: FeishuOutbox
-  readonly assessor: GlmAssessor
-  readonly passes: Passes
-
+  readonly registry = createRegistry()
+  private harness?: Harness
   private readonly board = new HealthBoard()
-  private readonly lifetime = new AbortController()
-  private release?: () => void
   private closed = false
 
   constructor(readonly cfg: Config, private readonly options: RuntimeOptions = {}) {
     const log = this.log.bind(this)
-    mkdirSync(cfg.stateDir, { recursive: true, mode: 0o700 })
-    this.release = lockSync(cfg.stateDir, { stale: 30_000 })
-    this.store = new Store(join(cfg.stateDir, 'orchestrator.sqlite'), error => log('store', String(error)))
-    this.bootstrapSettings()
-    this.effects = new Effects(this.store, this.board)
-    this.channel = this.options.channel ?? new FeishuSource(cfg, { onTrigger: trigger => this.onTrigger(trigger), log })
-    this.outbox = new FeishuOutbox({
-      store: this.store,
-      effects: this.effects,
-      channel: this.channel,
-      paused: () => this.store.settings().paused,
+    this.plugin = createSuperagentExtension({
+      stateDir: cfg.stateDir,
+      workDir: cfg.workDir,
+      harnessDir: cfg.harnessDir,
+      maxWorkers: cfg.maxWorkers,
+      evalMode: cfg.evalMode,
+      router: { provider: cfg.provider, model: cfg.model },
+      worker: { provider: cfg.workerProvider, model: cfg.workerModel },
+      channel: { send: message => this.channel.send(message) },
+      scope: input => this.channel.scope(input),
+      allowAll: cfg.allowAll,
+      allowedActors: cfg.allowedOpenIds,
+      unaddressedAdmission: cfg.unaddressedAdmission,
+      assessor: { baseUrl: cfg.baseUrl, apiKeyEnv: cfg.apiKeyEnv },
+      replyLanguage: cfg.replyLanguage,
       log,
     })
-    const engineRef: { current?: Engine } = {}
-    this.assessor = new GlmAssessor(cfg, {
-      decide: (triggerId, outcome) => engineRef.current?.decide(triggerId, outcome),
-      log,
-    })
-    this.executor = new PiExecutor({
-      store: this.store,
-      cfg,
-      log,
-      engine: {
-        assignmentStarted: (ticketId, assignmentId) => engineRef.current?.assignmentStarted(ticketId, assignmentId),
-        inputsDelivered: (ticketId, assignmentId, ids) => engineRef.current?.inputsDelivered(ticketId, assignmentId, ids),
-        report: (ticketId, report) => engineRef.current!.report(ticketId, report),
-        assignmentInterrupted: (ticketId, assignmentId) => engineRef.current?.assignmentInterrupted(ticketId, assignmentId),
-        reply: request => engineRef.current?.reply(request),
-      },
-    })
-    const scope = { scope: (input: { source: string; meta: Record<string, unknown> }) => this.channel.scope(input) }
-    this.engine = new Engine({
-      repo: this.store,
-      policy: () => settingsPolicy(this.store.settings(), scope),
-      scope,
-      assessor: this.assessor,
-      executor: this.executor,
-      outbox: this.outbox,
-      prepareTicket: ticket => ticket,
-    })
-    engineRef.current = this.engine
-    this.passes = new Passes({
-      engine: this.engine,
-      effects: this.effects,
-      health: this.board.claim('passes', { state: 'starting', detail: '' }),
-      lifetime: this.lifetime.signal,
-      configured: () => true,
-      closing: () => this.closed,
-    })
+    this.channel = this.options.channel ?? new FeishuSource(cfg, { onTrigger: trigger => this.plugin.ingest(trigger), log })
+    this.registry.install(CodingTools)
+    this.registry.install(this.plugin)
   }
 
+  /** The domain store (tickets, threads, decisions, outbox receipts), owned by the plugin. */
+  get store(): SuperagentPlugin['store'] { return this.plugin.store }
+
   async start(): Promise<void> {
-    // Effects only dispatch between start() and drain(); queued receipts wait until then.
-    this.effects.start()
-    await this.executor.open()
-    this.recover()
-    this.passes.start()
+    const { cfg } = this
+    await mkdir(cfg.harnessDir, { recursive: true })
+    const storage = await openNodeJsonlStorage(cfg.harnessDir, BACKGROUND_CONTEXT, { fsync: true })
+    this.harness = await Harness.open(storage, {
+      models: buildModels(cfg),
+      registry: this.registry,
+      env: ({ cwd }) => new NodeExecutionEnv({ cwd: cwd || cfg.workDir }),
+    }, BACKGROUND_CONTEXT)
+    this.plugin.bind(this.harness)
+    await this.plugin.start()
     // Long connections are the only inbound path; a failed start must fail the process, not idle silently.
     await this.channel.start?.()
     this.board.claim('runtime', { state: 'ready', detail: 'super-agent ready', at: new Date().toISOString() })
     this.log('runtime ready', {
-      state: this.cfg.stateDir,
-      evalMode: this.store.settings().eval.mode,
-      model: `${this.cfg.provider}/${this.cfg.model}`,
-      worker: `${this.cfg.workerProvider}/${this.cfg.workerModel}`,
+      state: cfg.stateDir,
+      evalMode: this.plugin.store.settings().eval.mode,
+      model: `${cfg.provider}/${cfg.model}`,
+      worker: `${cfg.workerProvider}/${cfg.workerModel}`,
     })
   }
 
   /** Feed one Trigger through the same path the Feishu WebSocket uses (selftest and local dispatch). */
   inject(trigger: Trigger): void {
-    this.onTrigger(trigger)
-  }
-
-  private onTrigger(trigger: Trigger): void {
-    try {
-      const result = this.passes.receive(trigger)
-      this.log('trigger received', { id: trigger.id, actor: trigger.actor.id, result })
-    } catch (error) {
-      this.log('trigger refused', String((error as Error)?.message ?? error))
-    }
-  }
-
-  /** Assignments left `running` by a previous process were interrupted; the domain records it for retry. */
-  private recover(): void {
-    for (const ticket of this.store.tickets.active()) {
-      const assignment = ticket.assignments.at(-1)
-      if (assignment?.state === 'running') {
-        this.engine.assignmentInterrupted(ticket.id, assignment.id)
-        this.log('interrupted assignment recovered', `${ticket.id}/${assignment.id}`)
-      }
-    }
-  }
-
-  /** Seed the first settings revision from env: eval mode, worker cap and the Feishu sender allow-list. */
-  private bootstrapSettings(): void {
-    if (this.store.settingsHistory(1).length) return
-    const current = this.store.settings()
-    this.store.saveSettings({
-      ...current,
-      eval: { ...current.eval, mode: this.cfg.evalMode },
-      executor: { ...current.executor, maxWorkers: this.cfg.maxWorkers },
-      policy: {
-        ...current.policy,
-        sources: {
-          ...current.policy.sources,
-          feishu: {
-            ...(current.policy.sources.feishu ?? {}),
-            allowed: this.cfg.allowedOpenIds.map(id => ({ id })),
-            allowAll: this.cfg.allowAll,
-            admission: { group: { listedUnaddressed: this.cfg.unaddressedAdmission } },
-          },
-        },
-      },
-    }, { source: 'internal', policyVersion: '', policyChanged: true, notified: [] })
-    this.log('settings seeded', { evalMode: this.cfg.evalMode, allowAll: this.cfg.allowAll })
+    this.plugin.ingest(trigger)
   }
 
   async stop(): Promise<void> {
     if (this.closed) return
     this.closed = true
-    await this.passes.stop()
-    await this.effects.drain().catch(() => {})
-    await this.executor.close()
+    await this.plugin.stop()
+    await this.harness?.close(BACKGROUND_CONTEXT).catch(() => {})
     await this.channel.stop?.()
-    this.store.close()
-    this.release?.()
     this.log('runtime stopped')
   }
 

@@ -25,5 +25,7 @@ docker run -d \
   --volume /data/piagent-workspace:/workspace \
   --volume /data/piagent-work:/work \
   --workdir /work \
-  changediff/pi-agent:superagent
-echo "pi-agent started on changediff/pi-agent:superagent (hardened)."
+  changediff/pi-agent:superagent-plugin
+echo "pi-agent started on changediff/pi-agent:superagent-plugin (hardened)."
+# Rollback: rebuild the previous image tag changediff/pi-agent:superagent from git and repoint this
+# script at it (it still exists until pruned).

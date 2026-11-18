@@ -9,6 +9,16 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "main": "src/pi/main.ts",
+  "exports": {
+    ".": {
+      "types": "./src/pi/main.ts",
+      "default": "./src/pi/main.ts"
+    },
+    "./plugin": {
+      "types": "./src/plugin/index.ts",
+      "default": "./src/plugin/index.ts"
+    }
+  },
   "scripts": {
     "start": "node --experimental-transform-types --no-warnings src/pi/main.ts",
     "selftest": "node --experimental-transform-types --no-warnings src/pi/main.ts --selftest",

@@ -36,7 +36,7 @@ type Reply = { decision?: string; title?: string; scope?: string; reason?: strin
 export class GlmAssessor {
   private readonly inFlight = new Map<string, AbortController>()
 
-  constructor(private readonly cfg: Config, private readonly host: AssessorHost) {}
+  constructor(private readonly cfg: Pick<Config, 'model' | 'baseUrl' | 'apiKeyEnv'>, private readonly host: AssessorHost) {}
 
   request(candidate: Candidate): void {
     const trigger = candidate.triggers.at(-1)
