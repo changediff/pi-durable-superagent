@@ -12,7 +12,7 @@ import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { configure, defineTask, type ConversationHandle, type ConversationId, type RunningTask, type TaskRuntime, type Tx } from '@earendil-works/pi-durable'
 import type { Context } from '@earendil-works/chord/context'
-import { liveTicket, runningAssignment, type Engine, type Ticket } from '../core/index.ts'
+import { liveTicket, runningAssignment, threadKey, type Engine, type Ticket, type Trigger } from '../core/index.ts'
 import { record } from '../kv.ts'
 import { backgroundJobs } from './react.ts'
 import type { Store } from '../app/store.ts'
@@ -95,13 +95,18 @@ const WORKER_INSTRUCTIONS = `你是超级智能体（super-agent）的 Worker，
 - 完成或遇到无法继续的阻塞时，用一段简洁中文说明结果、改了什么、验证了什么、还剩什么。
 - 无法继续时也可以调用 superagent_report 工具上报 blocked / failed；这段最终说明会直接发回用户。`
 
+/** Inline budget (design doc §3.3): external content injected into a brief longer than this spills out of it. */
+export const BRIEF_INLINE_LIMIT = 1200
+const BRIEF_INLINE_HEAD = 800
+const BRIEF_INLINE_TAIL = 300
+
 /** Build the first brief a worker conversation receives for an assignment. */
 export function workerBrief(store: Store, cfg: ResolvedSuperagentConfig, ticket: Ticket): string {
   const origin = store.triggers.get(ticket.origin.triggerId)
   const parts = [
     `# 工单：${ticket.title}`,
     `目标：${ticket.mandate.scope || ticket.title}`,
-    origin ? `\n发起人消息：\n${origin.text}` : '',
+    origin ? inlineOrigin(cfg, ticket, origin) : '',
     '',
     '要求：',
     '1. 直接动手完成任务，不要只给建议。可以用 read/write/edit/bash 工具。',
@@ -111,6 +116,24 @@ export function workerBrief(store: Store, cfg: ResolvedSuperagentConfig, ticket:
     '5. 不要重复发起人已经说明的内容；不要输出中间过程。',
   ]
   return parts.filter(Boolean).join('\n')
+}
+
+/**
+ * Inline one external message into the brief with its recall ids (`[trigger:… thread:…]`), so the
+ * worker knows the next hop. Within the inline budget the text passes through untouched; beyond it
+ * only head + tail stay inline and the middle spills behind a `recall` reference.
+ */
+function inlineOrigin(cfg: ResolvedSuperagentConfig, ticket: Ticket, origin: Trigger): string {
+  const marker = `[trigger:${origin.id} thread:${threadKey(origin.threads[0] ?? { source: origin.source, id: origin.channel?.thread ?? 'unknown' })}]`
+  const text = origin.text.length > BRIEF_INLINE_LIMIT ? spillOrigin(cfg, ticket, origin) : origin.text
+  return `\n发起人消息 ${marker}：\n${text}`
+}
+
+/** Spill the middle of an over-budget origin message out of the brief, logging what was kept. */
+function spillOrigin(cfg: ResolvedSuperagentConfig, ticket: Ticket, origin: Trigger): string {
+  const kept = BRIEF_INLINE_HEAD + BRIEF_INLINE_TAIL
+  cfg.log('brief spill', { ticketId: ticket.id, triggerId: origin.id, chars: origin.text.length, kept })
+  return `${origin.text.slice(0, BRIEF_INLINE_HEAD)}\n… spilled ${origin.text.length - kept} chars; recall({kind:'trigger', id:'${origin.id}'})\n${origin.text.slice(-BRIEF_INLINE_TAIL)}`
 }
 
 /**

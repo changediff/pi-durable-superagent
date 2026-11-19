@@ -72,6 +72,11 @@ export function storeReads(db: DatabaseSync) {
     .map(row => ({ ...JSON.parse(String(row.value)) as Receipt, attempts: Number(row.attempts), error: String(row.error) })),
   droppedReplies: (limit = 20): Dropped[] =>
     values('SELECT value FROM outbox WHERE dropped IS NOT NULL ORDER BY dropped DESC LIMIT ?', limit),
+  /** Newest outbox receipts of the given tickets (any ticket when `ticketIds` is empty), newest first. */
+  outbox: (ticketIds: string[], limit = 5): Receipt[] => {
+    const filter = ticketIds.length ? `WHERE value ->> '$.ticketId' IN (${ticketIds.map(() => '?').join(',')})` : ''
+    return values(`SELECT value FROM outbox ${filter} ORDER BY rowid DESC LIMIT ?`, ...ticketIds, limit)
+  },
   droppedSince: (since: string): number => Number(db.prepare('SELECT COUNT(*) AS n FROM outbox WHERE dropped >= ?').get(since)?.n ?? 0),
   subscribedThreads: (source?: string): Thread[] => source
     ? values('SELECT value FROM thread WHERE subscribed = ? ORDER BY rowid', source)

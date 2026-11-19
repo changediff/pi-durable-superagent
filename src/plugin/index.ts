@@ -24,7 +24,8 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context'
-import { defineExtension, section, type Extension, type Harness } from '@earendil-works/pi-durable'
+import type { Context } from '@earendil-works/chord/context'
+import { defineExtension, section, type ConversationId, type EntryRecord, type Extension, type Harness } from '@earendil-works/pi-durable'
 import { Engine, liveTicket, type ScopeResult, type Trigger } from '../core/index.ts'
 import { settingsPolicy } from '../policy.ts'
 import { Store } from '../app/store.ts'
@@ -37,6 +38,7 @@ import type { ChannelPort } from '../pi/channel.ts'
 import { resolveSuperagentConfig, type SuperagentConfig } from './config.ts'
 import { PluginExecutor } from './executor.ts'
 import { createSuperagentTools, SUPERAGENT_SECTION } from './tools.ts'
+import { createRecallTool } from './recall.ts'
 import { createWorkerTask, WorkerBridges, type WorkerTaskInput, type WorkerTaskState } from './worker.ts'
 
 /** The plugin: a plain extension (installable in any registry) plus the host-side handles. */
@@ -107,7 +109,10 @@ export function createSuperagentExtension(config: SuperagentConfig): SuperagentP
   const workerTask = createWorkerTask({ store, cfg, engine: () => engineRef.current!, bridges })
   const extension = defineExtension({
     name: 'superagent',
-    tools: createSuperagentTools({ store, cfg, engine: () => engineRef.current!, executor, bridges }),
+    tools: [
+      ...createSuperagentTools({ store, cfg, engine: () => engineRef.current!, executor, bridges }),
+      createRecallTool({ store, cfg, readConversation }),
+    ],
     sections: [section('superagent', () => SUPERAGENT_SECTION, { tag: true })],
     tasks: [workerTask],
   })
@@ -156,9 +161,25 @@ export function createSuperagentExtension(config: SuperagentConfig): SuperagentP
     },
   })
 
+  /**
+   * Read a conversation's newest transcript entries plus a capped total for `recall` — a bounded,
+   * read-only entry scan through the harness (`undefined` before `bind(harness)`).
+   */
+  async function readConversation(
+    conversationId: string, recent: number, countCap: number, context: Context,
+  ): Promise<{ recent: EntryRecord[]; total: number; capped: boolean } | undefined> {
+    const harness = harnessRef.current
+    const numeric = Number(conversationId)
+    if (!harness || !Number.isInteger(numeric)) return undefined
+    return await harness.commit(async tx => {
+      const page = await tx.scanEntries({ conversationId: numeric as ConversationId, order: 'descending' }, countCap)
+      const entries = [...page.items]
+      return { recent: entries.slice(0, recent).reverse(), total: entries.length, capped: entries.length >= countCap }
+    }, context)
+  }
+
   /** Assignments left `running` by a previous process were interrupted; the domain records it for retry. */
-  function recover(): void {
-    for (const ticket of store.tickets.active()) {
+  function recover(): void {    for (const ticket of store.tickets.active()) {
       const assignment = ticket.assignments.at(-1)
       if (assignment?.state === 'running') {
         engine.assignmentInterrupted(ticket.id, assignment.id)

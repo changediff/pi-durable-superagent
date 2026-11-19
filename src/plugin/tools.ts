@@ -22,7 +22,7 @@ export interface ToolDeps {
   bridges: WorkerBridges
 }
 
-export const SUPERAGENT_TOOLS = ['superagent_dispatch', 'superagent_status', 'superagent_cancel', 'superagent_report', 'a2a_send'] as const
+export const SUPERAGENT_TOOLS = ['superagent_dispatch', 'superagent_status', 'superagent_cancel', 'superagent_report', 'a2a_send', 'recall'] as const
 
 /** The system prompt section that documents the surface (rendered into every conversation selecting the extension). */
 export const SUPERAGENT_SECTION = `You are connected to the super-agent (超级智能体) Router surface.
@@ -32,6 +32,7 @@ export const SUPERAGENT_SECTION = `You are connected to the super-agent (超级�
 - superagent_cancel: stop a ticket's worker (the domain ends the ticket; no result is delivered).
 - superagent_report: worker-side only. A worker conversation reports its state (ready, blocked, failed, ...) with a summary; workers call it when they cannot finish, or to report completion early.
 - a2a_send: call another A2A agent (peer) by its configured name and return its answer text. Peers come from the plugin's a2a.peers configuration; an unknown peer or a failed call returns an error message instead of throwing.
+- recall: fetch one stored object by id — kind: trigger | thread | ticket | conversation | outbox — as a bounded view with a short summary and 'next' hops to walk the reference graph (trigger → its threads and tickets; thread → its tickets and recent triggers; ticket → its threads, worker conversation, replies; conversation → its ticket and recent entry summaries; outbox → its ticket and thread). Long fields are inlined head+tail only; pass the cursor shown in the view (e.g. "text:0") to page through the full text. Read-only.
 
 Workers run in their own conversations with coding tools and do the actual work; their final message is delivered back verbatim. Reply and worker language follows the user's language (中文请求用中文回复).`
 
