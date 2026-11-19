@@ -14,6 +14,7 @@ import { configure, defineTask, type ConversationHandle, type ConversationId, ty
 import type { Context } from '@earendil-works/chord/context'
 import { liveTicket, runningAssignment, type Engine, type Ticket } from '../core/index.ts'
 import { record } from '../kv.ts'
+import { backgroundJobs } from './react.ts'
 import type { Store } from '../app/store.ts'
 import type { ResolvedSuperagentConfig } from './config.ts'
 import { lastAssistantText } from './transcript.ts'
@@ -131,7 +132,7 @@ export function createWorkerTask(deps: WorkerTaskDeps) {
       const stored = deps.store.get(workerConversationKey(task.input.ticketId))
       if (stored) {
         const handle = await runtime.conversation(stored as ConversationId, context)
-        await handle?.abort(context).catch(error => deps.cfg.log('worker abort failed', String(error)))
+        if (handle) await endConversation(handle, context, error => deps.cfg.log('worker abort failed', String(error)))
       }
       await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'aborted' } }), context).catch(() => {})
     },
@@ -193,15 +194,15 @@ async function runWorker(deps: WorkerTaskDeps, task: WorkerTask, runtime: Worker
     })()
     if (settled.kind === 'stopped') {
       cfg.log('worker stopped', `${ticketId}: by the domain`)
-      await handle.abort(context).catch(error => cfg.log('worker abort failed', String(error)))
+      await endConversation(handle, context, error => cfg.log('worker abort failed', String(error)))
     } else if (settled.kind === 'timeout') {
       const detail = `worker timed out after ${Math.round(cfg.workerTurnTimeoutMs / 60000)} min`
       cfg.log('worker timed out', ticketId)
-      await handle.abort(context).catch(() => {})
+      await endConversation(handle, context, () => {})
       report(deps, ticketId, { state: 'failed', summary: `执行失败：${detail}`.slice(0, 1000) })
     } else if (settled.kind === 'watchdog') {
       cfg.log('worker stopped by watchdog', `${ticketId}: ${settled.summary}`)
-      await handle.abort(context).catch(error => cfg.log('worker abort failed', String(error)))
+      await endConversation(handle, context, error => cfg.log('worker abort failed', String(error)))
       report(deps, ticketId, { state: 'failed', summary: `执行失败：${settled.summary}`.slice(0, 1000) })
     } else if (settled.value.status === 'done' && settled.value.type === 'input') {
       const summary = await lastAssistantText(runtime, handle.id, context) || '已完成，但没有文本输出。'
@@ -258,6 +259,15 @@ async function workerConversation(
   const handle = await runtime.conversation(id, context)
   if (!handle) throw new Error(`worker conversation ${ticket.id} missing from storage`)
   return handle
+}
+
+/**
+ * End a worker conversation for good: clean up any background tasks (react `start`) it left
+ * running — whoever started them owns them — then abort the conversation itself.
+ */
+async function endConversation(handle: ConversationHandle, context: Context, onAbortError: (error: unknown) => void): Promise<void> {
+  backgroundJobs.dispose(String(handle.id))
+  await handle.abort(context).catch(onAbortError)
 }
 
 /** Await a worker turn against stop, timeout, and a watchdog abort, the way the host executor raced its controller. */

@@ -11,7 +11,7 @@
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context'
-import { Harness, createRegistry } from '@earendil-works/pi-durable'
+import { Harness, createRegistry, type ConversationId } from '@earendil-works/pi-durable'
 import { CodingTools } from '@earendil-works/pi-durable/tools'
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node'
 import { openNodeJsonlStorage } from '@earendil-works/pi-durable/storage/jsonl/node'
@@ -20,6 +20,7 @@ import type { OutboundMessage } from '../core/index.ts'
 import type { ScopeResult } from '../core/index.ts'
 import { HealthBoard } from '../infra/health.ts'
 import { createSuperagentExtension, type SuperagentPlugin } from '../plugin/index.ts'
+import { createReactExtension, type ReactExtension } from '../plugin/react.ts'
 import type { Config } from './config.ts'
 import { FeishuSource } from './feishu.ts'
 import type { ChannelPort } from './channel.ts'
@@ -66,6 +67,8 @@ class CompositeChannel implements ChannelPort {
 export class PiSuperagentRuntime {
   readonly plugin: SuperagentPlugin
   readonly channel: ChannelPort
+  /** The async ReAct tools (start/stop/list), at the CodingTools layer so every session gets them. */
+  readonly react: ReactExtension
   readonly registry = createRegistry()
   private harness?: Harness
   private readonly board = new HealthBoard()
@@ -101,7 +104,13 @@ export class PiSuperagentRuntime {
     const primary = this.options.channel ?? new FeishuSource(cfg, { onTrigger: trigger => this.plugin.ingest(trigger), log })
     const a2a = cfg.a2a.enabled ? new A2AChannel(cfg.a2a, { onTrigger: trigger => this.plugin.ingest(trigger), log }) : undefined
     this.channel = a2a ? new CompositeChannel(primary, a2a) : primary
+    this.react = createReactExtension({
+      // Delivery resolves the harness lazily: the registry is built before the harness opens.
+      session: async id => this.harness?.conversation(Number(id) as ConversationId, BACKGROUND_CONTEXT),
+      log,
+    })
     this.registry.install(CodingTools)
+    this.registry.install(this.react)
     this.registry.install(this.plugin)
   }
 
@@ -139,6 +148,8 @@ export class PiSuperagentRuntime {
   async stop(): Promise<void> {
     if (this.closed) return
     this.closed = true
+    // Every session ends with the process: kill the background tasks they left running.
+    this.react.jobs.disposeAll()
     await this.plugin.stop()
     await this.harness?.close(BACKGROUND_CONTEXT).catch(() => {})
     await this.channel.stop?.()
