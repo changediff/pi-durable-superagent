@@ -81,6 +81,12 @@ export class PiSuperagentRuntime {
       evalMode: cfg.evalMode,
       router: { provider: cfg.provider, model: cfg.model },
       worker: { provider: cfg.workerProvider, model: cfg.workerModel },
+      watchdog: {
+        mode: cfg.watchdog.mode,
+        intervalMs: cfg.watchdog.intervalMs,
+        maxInterventions: cfg.watchdog.maxInterventions,
+        model: { provider: cfg.workerProvider, model: cfg.watchdog.model },
+      },
       channel: { send: message => this.channel.send(message) },
       scope: input => this.channel.scope(input),
       allowAll: cfg.allowAll,

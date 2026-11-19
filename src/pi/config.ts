@@ -25,6 +25,14 @@ export const ConfigSchema = z.object({
   workerModel: z.string().min(1),
   maxWorkers: z.number().int().min(1).max(16),
 
+  /** Turn watchdog: mode, pacing, model id (provider follows the worker's) and nudge budget. */
+  watchdog: z.object({
+    mode: z.enum(['off', 'observe', 'auto']),
+    intervalMs: z.number().int().positive(),
+    model: z.string().min(1),
+    maxInterventions: z.number().int().min(1),
+  }),
+
   /** `auto` accepts explicit requests; `observe` records them as would-accept; `off` ignores candidates. */
   evalMode: z.enum(['off', 'observe', 'auto']),
   /** Admission strength for messages from listed senders that do not address the bot. */
@@ -76,6 +84,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     workerProvider: env.SUP_WORKER_PROVIDER || env.SUP_PROVIDER || 'zhipu',
     workerModel: env.SUP_WORKER_MODEL || env.SUP_MODEL || 'glm-5.3',
     maxWorkers: Number(env.SUP_MAX_WORKERS || 3),
+    watchdog: {
+      mode: watchdogMode(env.SUP_WATCHDOG),
+      intervalMs: Number(env.SUP_WATCHDOG_INTERVAL_MS || 120_000),
+      // An unset watchdog model keeps the worker's; the provider always follows the worker's.
+      model: env.SUP_WATCHDOG_MODEL || env.SUP_WORKER_MODEL || env.SUP_MODEL || 'glm-5.3',
+      maxInterventions: Number(env.SUP_WATCHDOG_MAX_INTERVENTIONS || 2),
+    },
     evalMode: (env.SUP_EVAL_MODE as Config['evalMode']) || 'auto',
     unaddressedAdmission: env.SUP_UNADDRESSED === 'inferred' ? 'inferred' : 'ignore',
     feishuAppId: env.FEISHU_APP_ID || '',
@@ -94,6 +109,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       peers: parsePeers(env.SUP_A2A_PEERS),
     },
   })
+}
+
+/** `SUP_WATCHDOG` value to mode; unset and unrecognised values keep the watchdog off. */
+function watchdogMode(value: string | undefined): Config['watchdog']['mode'] {
+  return value === 'observe' || value === 'auto' ? value : 'off'
 }
 
 /** `SUP_A2A_PEERS` JSON array; a parse failure yields no peers instead of failing startup. */

@@ -23,7 +23,8 @@ export function buildModels(cfg: Config) {
     name: 'Zhipu GLM',
     baseUrl: cfg.baseUrl,
     auth: { apiKey: envApiKeyAuth('Zhipu', [cfg.apiKeyEnv]) },
-    models: [entry(cfg.model, `GLM ${cfg.model}`), entry(cfg.workerModel, `GLM ${cfg.workerModel}`)],
+    // The watchdog model defaults to the worker's, so it is usually already listed; dedupe for the explicit case.
+    models: [...new Set([cfg.model, cfg.workerModel, cfg.watchdog.model])].map(id => entry(id, `GLM ${id}`)),
     api,
   }))
   return models

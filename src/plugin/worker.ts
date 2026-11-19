@@ -10,12 +10,14 @@
  */
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import { AssistantEntry, configure, defineTask, type ConversationHandle, type ConversationId, type RunningTask, type TaskRuntime, type Tx } from '@earendil-works/pi-durable'
+import { configure, defineTask, type ConversationHandle, type ConversationId, type RunningTask, type TaskRuntime, type Tx } from '@earendil-works/pi-durable'
 import type { Context } from '@earendil-works/chord/context'
 import { liveTicket, runningAssignment, type Engine, type Ticket } from '../core/index.ts'
 import { record } from '../kv.ts'
 import type { Store } from '../app/store.ts'
 import type { ResolvedSuperagentConfig } from './config.ts'
+import { lastAssistantText } from './transcript.ts'
+import { startWorkerWatchdog } from './watchdog.ts'
 
 /** How long a queued worker task waits between worker-slot checks. */
 const SLOT_POLL_MS = 1500
@@ -70,6 +72,8 @@ export interface RunningWorker {
   stop(): void
   /** Submit a person's follow-up input to the worker conversation. */
   deliver(text: string): Promise<void>
+  /** Submit the watchdog's guardian nudge through the same channel, labelled as the watchdog's. */
+  nudge(text: string): Promise<void>
 }
 
 /** Count the assignments the domain currently records as running (the worker-slot occupancy). */
@@ -153,6 +157,9 @@ async function runWorker(deps: WorkerTaskDeps, task: WorkerTask, runtime: Worker
     ticketId, assignmentId, conversationId: handle.id, stopped,
     stop: () => { stopRequested = true; stop.request() },
     deliver: async text => { await handle.submit({ type: 'input', content: `用户追加：\n${text}` }, context) },
+    // The same steer path `deliver()` uses, but labelled as the watchdog's and never admitted once
+    // the turn is over (`whenIdle: "reject"`), so a late nudge cannot start a run of its own.
+    nudge: async text => { await handle.submit({ type: 'input', content: text, whenIdle: 'reject' }, context) },
   }
   bridges.register(worker)
   try {
@@ -174,7 +181,16 @@ async function runWorker(deps: WorkerTaskDeps, task: WorkerTask, runtime: Worker
       { type: 'input', content: brief, requestId: `superagent:brief:${ticketId}:${assignmentId}` },
       context,
     )
-    const settled = await raceTurn(submission.wait(context), stopped, cfg.workerTurnTimeoutMs)
+    // The watchdog babysits this one long turn in its own conversation; whatever ends the race
+    // (done, stop, timeout, or the watchdog aborting it) stops it and clears its timer.
+    const watchdog = await startWorkerWatchdog(deps, ticket, worker, runtime, context)
+    const settled = await (async () => {
+      try {
+        return await raceTurn(submission.wait(context), stopped, cfg.workerTurnTimeoutMs, watchdog.aborted)
+      } finally {
+        await watchdog.stop()
+      }
+    })()
     if (settled.kind === 'stopped') {
       cfg.log('worker stopped', `${ticketId}: by the domain`)
       await handle.abort(context).catch(error => cfg.log('worker abort failed', String(error)))
@@ -183,6 +199,10 @@ async function runWorker(deps: WorkerTaskDeps, task: WorkerTask, runtime: Worker
       cfg.log('worker timed out', ticketId)
       await handle.abort(context).catch(() => {})
       report(deps, ticketId, { state: 'failed', summary: `执行失败：${detail}`.slice(0, 1000) })
+    } else if (settled.kind === 'watchdog') {
+      cfg.log('worker stopped by watchdog', `${ticketId}: ${settled.summary}`)
+      await handle.abort(context).catch(error => cfg.log('worker abort failed', String(error)))
+      report(deps, ticketId, { state: 'failed', summary: `执行失败：${settled.summary}`.slice(0, 1000) })
     } else if (settled.value.status === 'done' && settled.value.type === 'input') {
       const summary = await lastAssistantText(runtime, handle.id, context) || '已完成，但没有文本输出。'
       cfg.log('worker finished', `${ticketId}: ${summary.length} chars`)
@@ -240,9 +260,9 @@ async function workerConversation(
   return handle
 }
 
-/** Await a worker turn against stop and timeout, the way the host executor raced its controller. */
-async function raceTurn(wait: Promise<unknown>, stopped: Promise<void>, timeoutMs: number):
-  Promise<{ kind: 'settled'; value: { status: string; type?: string; reason?: string } } | { kind: 'stopped' } | { kind: 'timeout' }> {
+/** Await a worker turn against stop, timeout, and a watchdog abort, the way the host executor raced its controller. */
+async function raceTurn(wait: Promise<unknown>, stopped: Promise<void>, timeoutMs: number, aborted: Promise<string> = new Promise<string>(() => {})):
+  Promise<{ kind: 'settled'; value: { status: string; type?: string; reason?: string } } | { kind: 'stopped' } | { kind: 'timeout' } | { kind: 'watchdog'; summary: string }> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const timedOut = new Promise<'timeout'>(resolve => {
     timer = setTimeout(() => resolve('timeout'), timeoutMs)
@@ -253,6 +273,7 @@ async function raceTurn(wait: Promise<unknown>, stopped: Promise<void>, timeoutM
       Promise.resolve(wait).then(value => ({ kind: 'settled' as const, value: value as { status: string; type?: string } })),
       stopped.then(() => ({ kind: 'stopped' as const })),
       timedOut.then(kind => ({ kind: kind as 'timeout' })),
+      aborted.then(summary => ({ kind: 'watchdog' as const, summary })),
     ])
   } finally {
     if (timer) clearTimeout(timer)
@@ -263,19 +284,6 @@ async function raceTurn(wait: Promise<unknown>, stopped: Promise<void>, timeoutM
 function report(deps: WorkerTaskDeps, ticketId: string, value: { state: 'ready' | 'failed'; summary: string }): void {
   try { deps.engine().report(ticketId, value) }
   catch { /* ticket may have ended */ }
-}
-
-/** The newest non-empty assistant text of a worker conversation: the message sent back as the result. */
-async function lastAssistantText(runtime: WorkerRuntime, conversationId: ConversationId, context: Context): Promise<string> {
-  const view = await runtime.context(conversationId, context)
-  for (const entry of [...view.entries].reverse()) {
-    const isAssistant = (typeof AssistantEntry?.is === 'function' && AssistantEntry.is(entry)) || entry.kind === 'pi.assistant'
-    if (!isAssistant) continue
-    const message = ((entry as { model?: unknown[] }).model ?? [])[0] as { content?: { type: string; text?: string }[] }
-    const text = (message?.content ?? []).filter(part => part?.type === 'text').map(part => part.text ?? '').join('')
-    if (text.trim()) return text.trim()
-  }
-  return ''
 }
 
 export type { WorkerRuntime, WorkerTask }

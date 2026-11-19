@@ -4,6 +4,7 @@
  */
 import type { SettingsVersion } from './app/store.ts'
 import type { SettingsSave } from './policy.ts'
+import type { WatchdogVerdictRecord } from './plugin/watchdog.ts'
 
 /** Key of a KV record whose value has type `V`; a plain string represents an untyped key. */
 export type Key<V> = string & { readonly __value?: V }
@@ -32,6 +33,11 @@ export const KV = {
     prompts: record<number | null>('prompt-notification'), settings: record<number | null>('settings-notification') },
   /** Per-Source resolved display names mapping a named ID (such as a Feishu chat ID) to its display name. */
   sources: { labels: family<Record<string, string>, [source: string]>('source-labels:') },
+  /** Plugin Watchdog: its per-ticket durable conversation id, and its recorded verdicts (newest last, capped). */
+  watchdog: {
+    conversation: family<number, [ticket: string]>('watchdog-conv:'),
+    verdicts: family<WatchdogVerdictRecord[], [ticket: string]>('watchdog-verdicts:'),
+  },
   /**
    * Feishu Source: known chats (`true` for direct messages); per-chat history cursor and active topics mapped from topic ID
    * to last-seen timestamp; and per-polled-thread seen message IDs and initialization flag.
