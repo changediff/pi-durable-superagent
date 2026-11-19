@@ -38,6 +38,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [007 Architecture](docs/007-architecture.md)
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
 - [009 A2A](docs/009-a2a.md): agent-to-agent endpoint, peers, verified matrix, operations
+- [010 Watchdog](docs/010-watchdog.md): turn supervision, verdicts, modes, operations
 
 ## Port status
 
@@ -46,7 +47,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 | Feishu source, Router/Worker, durable workers | ported and running (`superagent-plugin6`) |
 | A2A (inbound server + outbound `a2a_send`) | done; peers cc2 Hermes, deb01 Hermes, CowAgent — both directions verified |
 | Passthrough / fast path (`passthrough` log) | done; conversation-level Threads |
-| Watchdog (model-level supervision of a worker) | next — only the heartbeat exists today |
+| Watchdog (model-level supervision of a worker) | done: own session, verdicts, nudge/abort — [010](docs/010-watchdog.md); live `observe` run pending |
 | Async ReAct (`start`/`stop` tool pair) | not started |
 | Chained recall / inline & spill | not started |
 | On-device daemon (BYOM) | not started |
