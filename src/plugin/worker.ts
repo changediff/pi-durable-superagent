@@ -214,53 +214,60 @@ async function runWorker(deps: WorkerTaskDeps, task: WorkerTask, runtime: Worker
     const brief = workerBrief(store, cfg, ticket)
     // One budget for the whole worker turn, including any rounds resumed for background results.
     const turnDeadline = runtime.now() + cfg.workerTurnTimeoutMs
-    const submission = await handle.submit(
-      { type: 'input', content: brief, requestId: `superagent:brief:${ticketId}:${assignmentId}` },
-      context,
-    )
-    // The watchdog babysits this one long turn in its own conversation; whatever ends the race
-    // (done, stop, timeout, or the watchdog aborting it) stops it and clears its timer.
+    // The watchdog babysits the whole turn — the brief's run, every background-job wait, and each
+    // resumed round — as one continuous supervision. It is stopped when the turn itself ends, not
+    // when the model first replies, so a stuck background command is still judged. `aborted` stays
+    // armed across rounds, and the intervention budget is shared by all of them.
     const watchdog = await startWorkerWatchdog(deps, ticket, worker, runtime, context)
-    const settled = await (async () => {
-      try {
-        return await raceTurn(submission.wait(context), stopped, cfg.workerTurnTimeoutMs, watchdog.aborted)
-      } finally {
-        await watchdog.stop()
-      }
-    })()
-    if (settled.kind === 'stopped') {
-      cfg.log('worker stopped', `${ticketId}: by the domain`)
-      await endConversation(handle, context, error => cfg.log('worker abort failed', String(error)))
-    } else if (settled.kind === 'timeout') {
-      const detail = `worker timed out after ${Math.round(cfg.workerTurnTimeoutMs / 60000)} min`
-      cfg.log('worker timed out', ticketId)
-      await endConversation(handle, context, () => {})
-      report(deps, ticketId, { state: 'failed', summary: `执行失败：${detail}`.slice(0, 1000) })
-    } else if (settled.kind === 'watchdog') {
-      cfg.log('worker stopped by watchdog', `${ticketId}: ${settled.summary}`)
-      await endConversation(handle, context, error => cfg.log('worker abort failed', String(error)))
-      report(deps, ticketId, { state: 'failed', summary: `执行失败：${settled.summary}`.slice(0, 1000) })
-    } else if (settled.value.status === 'done' && settled.value.type === 'input') {
-      // A turn must not end while a background job it started is still running: its result would
-      // arrive into a conversation nobody is reading. Wait for each result round instead.
-      const background = await awaitBackgroundJobs(deps, ticketId, handle, runtime, context, stopped, turnDeadline)
-      if (background.kind === 'stopped') {
+    try {
+      const submission = await handle.submit(
+        { type: 'input', content: brief, requestId: `superagent:brief:${ticketId}:${assignmentId}` },
+        context,
+      )
+      const settled = await raceTurn(submission.wait(context), stopped, cfg.workerTurnTimeoutMs, watchdog.aborted)
+      if (settled.kind === 'stopped') {
         cfg.log('worker stopped', `${ticketId}: by the domain`)
         await endConversation(handle, context, error => cfg.log('worker abort failed', String(error)))
-      } else {
-        if (background.turns > 0) cfg.log('worker resumed after background jobs', { ticketId, turns: background.turns })
-        const text = await lastAssistantText(runtime, handle.id, context) || '已完成，但没有文本输出。'
-        const note = backgroundNote(background.running)
-        const summary = note ? `${text}\n\n${note}` : text
-        cfg.log('worker finished', `${ticketId}: ${summary.length} chars`)
-        report(deps, ticketId, { state: 'ready', summary })
-        // The DSH build's main Session called orchestrator_reply; the plugin sends the result itself.
-        try { engine().reply({ purpose: 'result', ticketId, text: summary }) }
-        catch (error) { cfg.log('result reply refused', String((error as Error)?.message ?? error)) }
+      } else if (settled.kind === 'timeout') {
+        const detail = `worker timed out after ${Math.round(cfg.workerTurnTimeoutMs / 60000)} min`
+        cfg.log('worker timed out', ticketId)
+        await endConversation(handle, context, () => {})
+        report(deps, ticketId, { state: 'failed', summary: `执行失败：${detail}`.slice(0, 1000) })
+      } else if (settled.kind === 'watchdog') {
+        cfg.log('worker stopped by watchdog', `${ticketId}: ${settled.summary}`)
+        await endConversation(handle, context, error => cfg.log('worker abort failed', String(error)))
+        report(deps, ticketId, { state: 'failed', summary: `执行失败：${settled.summary}`.slice(0, 1000) })
+      } else if (settled.value.status === 'done' && settled.value.type === 'input') {
+        // A turn must not end while a background job it started is still running: its result would
+        // arrive into a conversation nobody is reading. Wait for each result round instead — under
+        // the same watchdog, whose abort still ends the turn from inside these waits.
+        const background = await awaitBackgroundJobs(deps, ticketId, handle, runtime, context, stopped, turnDeadline, watchdog.aborted)
+        if (background.kind === 'stopped') {
+          cfg.log('worker stopped', `${ticketId}: by the domain`)
+          await endConversation(handle, context, error => cfg.log('worker abort failed', String(error)))
+        } else if (background.kind === 'watchdog') {
+          cfg.log('worker stopped by watchdog', `${ticketId}: ${background.summary}`)
+          await endConversation(handle, context, error => cfg.log('worker abort failed', String(error)))
+          report(deps, ticketId, { state: 'failed', summary: `执行失败：${background.summary}`.slice(0, 1000) })
+        } else {
+          if (background.turns > 0) cfg.log('worker resumed after background jobs', { ticketId, turns: background.turns })
+          const text = await lastAssistantText(runtime, handle.id, context) || '已完成，但没有文本输出。'
+          const note = backgroundNote(background.running)
+          const summary = note ? `${text}\n\n${note}` : text
+          cfg.log('worker finished', `${ticketId}: ${summary.length} chars`)
+          report(deps, ticketId, { state: 'ready', summary })
+          // The DSH build's main Session called orchestrator_reply; the plugin sends the result itself.
+          try { engine().reply({ purpose: 'result', ticketId, text: summary }) }
+          catch (error) { cfg.log('result reply refused', String((error as Error)?.message ?? error)) }
+        }
+      } else if (!stopRequested) {
+        const reason = 'reason' in settled.value ? ` (${String(settled.value.reason)})` : ''
+        report(deps, ticketId, { state: 'failed', summary: `执行失败：worker turn ended as ${settled.value.status}${reason}`.slice(0, 1000) })
       }
-    } else if (!stopRequested) {
-      const reason = 'reason' in settled.value ? ` (${String(settled.value.reason)})` : ''
-      report(deps, ticketId, { state: 'failed', summary: `执行失败：worker turn ended as ${settled.value.status}${reason}`.slice(0, 1000) })
+    } finally {
+      // Whatever ended the turn (ready, stopped, timeout, watchdog abort, or a thrown error), the
+      // watchdog never outlives it: its timer is cleared and any in-flight judgement is cancelled.
+      await watchdog.stop()
     }
   } catch (error) {
     if (!stopRequested) {
@@ -283,7 +290,8 @@ async function runWorker(deps: WorkerTaskDeps, task: WorkerTask, runtime: Worker
 async function awaitBackgroundJobs(
   deps: WorkerTaskDeps, ticketId: string, handle: ConversationHandle,
   runtime: WorkerRuntime, context: Context, stopped: Promise<void>, deadline: number,
-): Promise<{ kind: 'settled' | 'stopped'; turns: number; running: readonly JobView[] }> {
+  aborted: Promise<string> = new Promise<string>(() => {}),
+): Promise<{ kind: 'settled' | 'stopped' | 'watchdog'; turns: number; running: readonly JobView[]; summary?: string }> {
   const jobs = deps.jobs ?? backgroundJobs
   const conversationId = String(handle.id)
   let turns = 0
@@ -298,16 +306,18 @@ async function awaitBackgroundJobs(
     })
     // Wait on the job table's own event (no polling); a signal releases the waiter at the deadline.
     const cancel = new AbortController()
-    const finished = await raceTurn(jobs.waitForSettled(conversationId, cancel.signal), stopped, left).finally(() => cancel.abort())
+    const finished = await raceTurn(jobs.waitForSettled(conversationId, cancel.signal), stopped, left, aborted).finally(() => cancel.abort())
     if (finished.kind === 'stopped') return { kind: 'stopped', turns, running: [] }
+    if (finished.kind === 'watchdog') return { kind: 'watchdog', turns, running: [], summary: finished.summary }
     if (finished.kind !== 'settled') return { kind: 'settled', turns, running: jobs.jobsOf(conversationId) }
     // The finished result was delivered as an input, which starts a run of its own. Wait for that
     // run to end before checking whether it started further background work.
     const idleLeft = deadline - runtime.now()
     if (idleLeft <= 0) return { kind: 'settled', turns, running: jobs.jobsOf(conversationId) }
-    const resumed = await raceTurn(handle.waitForIdle(context).catch(() => {}), stopped, idleLeft)
+    const resumed = await raceTurn(handle.waitForIdle(context).catch(() => {}), stopped, idleLeft, aborted)
     if (resumed.kind === 'stopped') return { kind: 'stopped', turns, running: [] }
     turns += 1
+    if (resumed.kind === 'watchdog') return { kind: 'watchdog', turns, running: [], summary: resumed.summary }
     if (resumed.kind !== 'settled') return { kind: 'settled', turns, running: jobs.jobsOf(conversationId) }
   }
 }

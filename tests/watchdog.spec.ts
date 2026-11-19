@@ -153,4 +153,18 @@ describe('turn watchdog', () => {
     expect(judge).toHaveBeenCalledTimes(1)
     expect(dog.checks).toBe(1)
   })
+
+  it('stop() is idempotent: a second call still leaves the interval cleared', async () => {
+    const { io, judge } = fakeIo([verdict('advancing')])
+    const dog = runTurnWatchdog(host(), io)
+    await vi.advanceTimersByTimeAsync(INTERVAL)
+    await settle()
+    expect(dog.checks).toBe(1)
+    await dog.stop()
+    await dog.stop()
+    expect(vi.getTimerCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(5 * INTERVAL)
+    expect(judge).toHaveBeenCalledTimes(1)
+    expect(dog.checks).toBe(1)
+  })
 })
