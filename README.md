@@ -40,6 +40,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [009 A2A](docs/009-a2a.md): agent-to-agent endpoint, peers, verified matrix, operations
 - [010 Watchdog](docs/010-watchdog.md): turn supervision, verdicts, modes, operations
 - [011 Async ReAct](docs/011-async-react.md): `start`/`stop` background jobs and result delivery
+- [012 Recall](docs/012-recall.md): inline ids, spill + cursor paging, chained recall
 
 ## Port status
 
@@ -50,7 +51,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 | Passthrough / fast path (`passthrough` log) | done; conversation-level Threads |
 | Watchdog (model-level supervision of a worker) | done: own session, verdicts, nudge/abort — [010](docs/010-watchdog.md); live `observe` run pending |
 | Async ReAct (`start`/`stop` tool pair) | done: detached jobs, result delivered as new input — [011](docs/011-async-react.md) |
-| Chained recall / inline & spill | not started |
+| Chained recall / inline & spill | first cut: `recall` graph walk, brief spill — [012](docs/012-recall.md) |
 | On-device daemon (BYOM) | not started |
 
 ## Development
