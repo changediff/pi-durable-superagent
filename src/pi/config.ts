@@ -1,5 +1,6 @@
 /** Environment-driven configuration for the pi-durable super-agent port. */
 import { z } from 'zod'
+import { OPENVIKING_DEFAULT_ENDPOINT, OPENVIKING_DEFAULT_PEER } from '../plugin/openviking.ts'
 
 const csv = (value: string | undefined): string[] =>
   (value ?? '').split(',').map(item => item.trim()).filter(Boolean)
@@ -59,6 +60,22 @@ export const ConfigSchema = z.object({
     token: z.string(),
   }),
 
+  /**
+   * OpenViking memory database (`viking_*` tools, design doc §014). Off unless `SUP_OPENVIKING=on`;
+   * the key comes from `SUP_OPENVIKING_API_KEY` with `OPENVIKING_API_KEY` as fallback and is sent
+   * in headers only.
+   */
+  openviking: z.object({
+    enabled: z.boolean(),
+    endpoint: z.string().url(),
+    apiKey: z.string(),
+    /** Writes are isolated into this peer's space (`X-OpenViking-Actor-Peer`). */
+    peer: z.string(),
+    /** Tenant headers, retried only when the server answers 401. */
+    account: z.string(),
+    user: z.string(),
+  }),
+
   /** A2A (agent-to-agent) section passed whole to the plugin; disabled unless `SUP_A2A` is set. */
   a2a: z.object({
     enabled: z.boolean(),
@@ -113,6 +130,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       enabled: truthy(env.SUP_DAEMON),
       // Empty token rejects every daemon request: the surface is never open without a bearer.
       token: env.SUP_DAEMON_TOKEN || '',
+    },
+    openviking: {
+      enabled: truthy(env.SUP_OPENVIKING),
+      endpoint: env.SUP_OPENVIKING_ENDPOINT || OPENVIKING_DEFAULT_ENDPOINT,
+      apiKey: env.SUP_OPENVIKING_API_KEY || env.OPENVIKING_API_KEY || '',
+      peer: env.SUP_OPENVIKING_PEER || OPENVIKING_DEFAULT_PEER,
+      account: env.SUP_OPENVIKING_ACCOUNT || 'default',
+      user: env.SUP_OPENVIKING_USER || 'default',
     },
     a2a: {
       enabled: truthy(env.SUP_A2A),

@@ -21,6 +21,7 @@ import type { ScopeResult } from '../core/index.ts'
 import { HealthBoard } from '../infra/health.ts'
 import { createSuperagentExtension, type SuperagentPlugin } from '../plugin/index.ts'
 import { createReactExtension, type ReactExtension } from '../plugin/react.ts'
+import { createOpenVikingExtension, type OpenVikingExtension } from '../plugin/openviking.ts'
 import type { Config } from './config.ts'
 import { FeishuSource } from './feishu.ts'
 import type { ChannelPort } from './channel.ts'
@@ -71,6 +72,8 @@ export class PiSuperagentRuntime {
   readonly channel: ChannelPort
   /** The async ReAct tools (start/stop/list), at the CodingTools layer so every session gets them. */
   readonly react: ReactExtension
+  /** The OpenViking memory tools (`viking_*`); present only when `SUP_OPENVIKING=on`. */
+  readonly openviking?: OpenVikingExtension
   readonly registry = createRegistry()
   /** The listener shared by A2A and `/daemon/*`; present when either surface is on. */
   private readonly http?: A2AChannel
@@ -130,6 +133,18 @@ export class PiSuperagentRuntime {
     })
     this.registry.install(CodingTools)
     this.registry.install(this.react)
+    // Memory is a capability of the worker, off by default: nothing registers when the switch is unset.
+    if (cfg.openviking.enabled) {
+      this.openviking = createOpenVikingExtension({
+        endpoint: cfg.openviking.endpoint,
+        apiKey: cfg.openviking.apiKey,
+        peer: cfg.openviking.peer,
+        account: cfg.openviking.account,
+        user: cfg.openviking.user,
+        log,
+      })
+      this.registry.install(this.openviking)
+    }
     this.registry.install(this.plugin)
   }
 
@@ -173,6 +188,7 @@ export class PiSuperagentRuntime {
     this.closed = true
     // Every session ends with the process: kill the background tasks they left running.
     this.react.jobs.disposeAll()
+    this.openviking?.stop()
     await this.plugin.stop()
     await this.harness?.close(BACKGROUND_CONTEXT).catch(() => {})
     await this.channel.stop?.()
