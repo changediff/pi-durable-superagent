@@ -41,6 +41,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [010 Watchdog](docs/010-watchdog.md): turn supervision, verdicts, modes, operations
 - [011 Async ReAct](docs/011-async-react.md): `start`/`stop` background jobs and result delivery
 - [012 Recall](docs/012-recall.md): inline ids, spill + cursor paging, chained recall
+- [013 BYOM daemon](docs/013-byom-daemon.md): device daemon protocol, leases, client loop
 
 ## Port status
 
@@ -52,7 +53,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 | Watchdog (model-level supervision of a worker) | done: own session, verdicts, nudge/abort — [010](docs/010-watchdog.md); live `observe` run pending |
 | Async ReAct (`start`/`stop` tool pair) | done: detached jobs, result delivered as new input — [011](docs/011-async-react.md) |
 | Chained recall / inline & spill | first cut: `recall` graph walk, brief spill — [012](docs/012-recall.md) |
-| On-device daemon (BYOM) | not started |
+| On-device daemon (BYOM) | first cut: protocol, lease registry, client loop, CLI shell — [013](docs/013-byom-daemon.md); executor + worker routing not started |
 
 ## Development
 
