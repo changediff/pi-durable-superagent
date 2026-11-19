@@ -91,6 +91,7 @@ export function createSuperagentExtension(config: SuperagentConfig): SuperagentP
     executor,
     outbox,
     prepareTicket: ticket => ticket,
+    log,
   })
   engineRef.current = engine
   const lifetime = new AbortController()

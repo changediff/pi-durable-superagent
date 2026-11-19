@@ -11,8 +11,9 @@ function trigger(id: string, overrides: Partial<Trigger> = {}): Trigger {
 interface Hooks {
   emit?: (event: { type: string; data: Record<string, unknown> }) => void
   prepareTicket?: EngineOptions['prepareTicket']
+  log?: EngineOptions['log']
 }
-function harness(policyOverrides: Partial<Policy> = {}, { emit, prepareTicket }: Hooks = {}) {
+function harness(policyOverrides: Partial<Policy> = {}, { emit, prepareTicket, log }: Hooks = {}) {
   const repo = new MemoryRepositories()
   const outbox: OutboundMessage[] = []
   const withdrawn: string[] = []
@@ -41,7 +42,7 @@ function harness(policyOverrides: Partial<Policy> = {}, { emit, prepareTicket }:
     withdraw: id => { withdrawn.push(id) },
   }
   const engine = new Engine({ repo, scope, policy: () => policy, assessor, executor, outbox: queued,
-    ...emit ? { emit } : {}, ...prepareTicket ? { prepareTicket } : {}, now: () => new Date(Date.UTC(2026, 8, 23, 0, 0, clock)).toISOString() })
+    ...emit ? { emit } : {}, ...prepareTicket ? { prepareTicket } : {}, ...log ? { log } : {}, now: () => new Date(Date.UTC(2026, 8, 23, 0, 0, clock)).toISOString() })
   /** Simulate the executor starting queued assignments (unless `launch` is false) and delivering pending ticket inputs. */
   function settle({ launch = true } = {}) {
     for (;;) {
@@ -79,6 +80,23 @@ describe('intake', () => {
     expect(h.engine.receive(trigger('2', { meta: { blocked: true } }))).toBe('filtered')
     expect(h.repo.triggers.disposition('2')?.filtered).toEqual({ code: 'chat not allowed' })
     expect(h.repo.threads.get('chat:t1')?.pending).toEqual(['1'])
+  })
+  it('routes a same-thread follow-up straight to the subscribed ticket without queuing an eval', () => {
+    const logs: unknown[][] = []
+    const h = harness({}, { log: (message, detail) => logs.push([message, detail]) })
+    const decision = accepted(h, '1')
+    const ticketId = decision.ticketId!
+    expect(h.repo.threads.get('chat:t1')?.subscriptions).toContain(ticketId)
+    const evalsBefore = h.requests.length
+    expect(h.engine.receive(trigger('2'))).toBe('stored')
+    expect(h.repo.triggers.disposition('2')?.fanout).toEqual([ticketId])
+    // Fast path: no Router decision was queued, so the follow-up skipped Eval entirely.
+    expect(h.repo.threads.get('chat:t1')?.pending).not.toContain('2')
+    expect(h.requests.length).toBe(evalsBefore)
+    expect(logs).toContainEqual(['passthrough', { triggerId: '2', tickets: [ticketId], threads: ['chat:t1'] }])
+    h.pump()
+    expect(h.requests.length).toBe(evalsBefore)
+    expect(h.delivered.at(-1)?.[0]).toBe(ticketId)
   })
   it('records correlation for a trigger on several threads and evaluates only on the primary one', () => {
     const h = harness()

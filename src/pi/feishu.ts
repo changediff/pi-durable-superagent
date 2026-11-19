@@ -20,9 +20,9 @@ export interface FeishuHost {
   log(message: string, detail?: unknown): void
 }
 
-/** Feishu thread identity: one thread per chat topic root (or the message itself at the root). */
+/** Feishu thread identity: conversation-level for p2p and plain chats, per topic thread otherwise. */
 export const feishuThreadId = (chatId: string, rootId: string | undefined, messageId: string): string =>
-  `${chatId}:${rootId ?? messageId}`
+  `${chatId}:${rootId ?? "chat"}`
 
 type MessageEvent = {
   sender: { sender_id?: { open_id?: string }; sender_type?: string }
@@ -121,7 +121,7 @@ export class FeishuSource implements SourceScope {
     if (senderType !== 'user' || !openId) return // Bots and system senders never originate work.
     const mentioned = (message.mentions ?? []).length > 0
     const chatType = message.chat_type ?? (message.chat_id.startsWith('oc_') ? 'group' : 'p2p')
-    const threadId = feishuThreadId(message.chat_id, message.root_id, message.message_id)
+    const threadId = feishuThreadId(message.chat_id, message.thread_id ?? message.root_id, message.message_id)
     const at = message.create_time && /^\d+$/.test(message.create_time)
       ? new Date(Number(message.create_time)).toISOString()
       : new Date().toISOString()

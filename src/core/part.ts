@@ -14,6 +14,8 @@ export interface EngineOptions {
   outbox: Outbox
   prepareTicket?: (ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>) => Ticket
   now?: () => string
+  /** Structured channel log; components report notable short-circuits (such as subscription passthrough) through it. */
+  log?: (message: string, detail?: unknown) => void
   emit?: (event: DomainEvent) => void
 }
 

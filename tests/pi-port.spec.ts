@@ -13,8 +13,13 @@ describe('feishu mapping', () => {
   })
 
   it('keys a thread by chat and topic root', () => {
-    expect(feishuThreadId('oc_1', undefined, 'om_1')).toBe('oc_1:om_1')
+    // Conversation-level: p2p and plain group chats have no root_id, so every message shares one chat-level Thread.
+    expect(feishuThreadId('oc_1', undefined, 'om_1')).toBe('oc_1:chat')
+    expect(feishuThreadId('oc_1', undefined, 'om_2')).toBe('oc_1:chat')
     expect(feishuThreadId('oc_1', 'om_root', 'om_2')).toBe('oc_1:om_root')
+    expect(feishuThreadId('oc_2', 'om_root', 'om_3')).toBe('oc_2:om_root')
+    // Topic threads stay distinct per root, and later messages in the same topic share the root's key.
+    expect(feishuThreadId('oc_1', 'om_root_b', 'om_4')).not.toBe(feishuThreadId('oc_1', 'om_root', 'om_2'))
   })
 })
 

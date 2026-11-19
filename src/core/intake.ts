@@ -56,6 +56,7 @@ export class Intake extends EnginePart {
     // A person's message that no ticket decides, such as one that reached only tickets a person stopped or that follow the
     // Thread for context, and every bot's, goes to Eval.
     if (!this.owners(trigger).length) this.queueForEval(trigger)
+    else if (fanout.length) this.options.log?.('passthrough', { triggerId: trigger.id, tickets: fanout, threads: keys })
     for (const ticketId of fanout) this.tickets.wake(ticketId)
     this.emit('trigger.received', { triggerId: trigger.id, threads: trigger.threads.map(threadKey) })
     return 'stored'
