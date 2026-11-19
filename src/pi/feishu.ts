@@ -24,7 +24,7 @@ export interface FeishuHost {
 export const feishuThreadId = (chatId: string, rootId: string | undefined, messageId: string): string =>
   `${chatId}:${rootId ?? "chat"}`
 
-type MessageEvent = {
+export type MessageEvent = {
   sender: { sender_id?: { open_id?: string }; sender_type?: string }
   message: {
     message_id: string; chat_id: string; chat_type?: string; message_type: string; content: string
