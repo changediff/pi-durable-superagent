@@ -22,6 +22,7 @@ import { HealthBoard } from '../infra/health.ts'
 import { createSuperagentExtension, type SuperagentPlugin } from '../plugin/index.ts'
 import { createReactExtension, type ReactExtension } from '../plugin/react.ts'
 import { createOpenVikingExtension, type OpenVikingExtension } from '../plugin/openviking.ts'
+import { createPeersExtension, type PeersExtension } from '../plugin/peers.ts'
 import type { Config } from './config.ts'
 import { FeishuSource } from './feishu.ts'
 import type { ChannelPort } from './channel.ts'
@@ -74,6 +75,8 @@ export class PiSuperagentRuntime {
   readonly react: ReactExtension
   /** The OpenViking memory tools (`viking_*`); present only when `SUP_OPENVIKING=on`. */
   readonly openviking?: OpenVikingExtension
+  /** The peer agent tools (`peer_list` / `peer_send`); present only when `SUP_PEERS=on`. */
+  readonly peers?: PeersExtension
   readonly registry = createRegistry()
   /** The listener shared by A2A and `/daemon/*`; present when either surface is on. */
   private readonly http?: A2AChannel
@@ -108,6 +111,8 @@ export class PiSuperagentRuntime {
       assessor: { baseUrl: cfg.baseUrl, apiKeyEnv: cfg.apiKeyEnv },
       replyLanguage: cfg.replyLanguage,
       a2a: cfg.a2a,
+      // Which capability plugins this runtime installs below: each adds its section to the worker brief.
+      capabilities: { peers: cfg.peers.enabled, openviking: cfg.openviking.enabled, openvikingUser: cfg.openviking.user },
       log,
     })
     const primary = this.options.channel ?? new FeishuSource(cfg, { onTrigger: trigger => this.plugin.ingest(trigger), log })
@@ -144,6 +149,19 @@ export class PiSuperagentRuntime {
         log,
       })
       this.registry.install(this.openviking)
+    }
+    // Peers are a capability of the worker too (design doc §014 cut 2), off by default:
+    // nothing registers when the switch is unset, and the brief never mentions them.
+    if (cfg.peers.enabled) {
+      this.peers = createPeersExtension({
+        hermesUrl: cfg.peers.hermesUrl,
+        hermesToken: cfg.peers.hermesToken,
+        cowUrl: cfg.peers.cowUrl,
+        cowToken: cfg.peers.cowToken,
+        timeoutMs: cfg.peers.timeoutMs,
+        log,
+      })
+      this.registry.install(this.peers)
     }
     this.registry.install(this.plugin)
   }
@@ -189,6 +207,7 @@ export class PiSuperagentRuntime {
     // Every session ends with the process: kill the background tasks they left running.
     this.react.jobs.disposeAll()
     this.openviking?.stop()
+    this.peers?.stop()
     await this.plugin.stop()
     await this.harness?.close(BACKGROUND_CONTEXT).catch(() => {})
     await this.channel.stop?.()

@@ -106,6 +106,35 @@ const WORKER_INSTRUCTIONS = `你是超级智能体（super-agent）的 Worker，
 - 完成或遇到无法继续的阻塞时，用一段简洁中文说明结果、改了什么、验证了什么、还剩什么。
 - 无法继续时也可以调用 superagent_report 工具上报 blocked / failed；这段最终说明会直接发回用户。`
 
+/**
+ * Peer dispatch policy (design doc §014 cut 2): appended to the worker instructions only while
+ * the `peers` plugin is installed, so the brief never advertises tools the worker lacks.
+ */
+export const WORKER_PEERS_SECTION = `## 你的同伴
+调用 peer_list 查看在线 agent 与技能；需要时用 peer_send 把整件事交给最合适的一个。
+规则：主机/编码/仓库/部署 → hermes-cc2；deb02 与家庭实验室/新闻/盯盘 → cowagent-deb02；
+两者都不可用才自己做。派出去的任务要带上完整上下文，不要把半句话丢给对方。`
+
+/**
+ * Memory discipline (design doc §014 cut 2): appended only while the `openviking` plugin is
+ * installed. The event/preference URIs stay inside the tenant the `viking_write` allowlist enforces.
+ */
+export function workerMemorySection(user: string): string {
+  return `## 你的记忆
+开工前用 viking_search 查一次相关记忆（人、偏好、项目、agent）；做完把结果用 viking_write
+记到 viking://user/${user}/memories/events/YYYY/MM/DD/<slug>.md，重要偏好写 memories/preferences/。
+你是共享记忆根的唯一写者；其他 agent 只写 peers/<id>/。`
+}
+
+/** The worker system prompt: the base instructions plus one section per installed capability. */
+export function workerInstructions(cfg: ResolvedSuperagentConfig): string {
+  return [
+    WORKER_INSTRUCTIONS,
+    ...(cfg.capabilities.peers ? [WORKER_PEERS_SECTION] : []),
+    ...(cfg.capabilities.openviking ? [workerMemorySection(cfg.capabilities.openvikingUser)] : []),
+  ].join('\n\n')
+}
+
 /** Inline budget (design doc §3.3): external content injected into a brief longer than this spills out of it. */
 export const BRIEF_INLINE_LIMIT = 1200
 const BRIEF_INLINE_HEAD = 800
@@ -355,7 +384,7 @@ async function workerConversation(
     await configure(tx, created.id, {
       model: { provider: cfg.worker.provider, modelId: cfg.worker.model },
       cwd: directory,
-      instructions: WORKER_INSTRUCTIONS,
+      instructions: workerInstructions(cfg),
     })
     conversationId = created.id
   }, context)

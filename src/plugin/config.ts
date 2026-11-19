@@ -109,9 +109,16 @@ export interface SuperagentConfig {
   log?(message: string, detail?: unknown): void
   /** Agent-to-agent settings: inbound server behavior and the outbound peer table. */
   a2a?: SuperagentA2AConfig
+  /**
+   * Optional capabilities installed next to this plugin (design doc §014): each switch adds a
+   * matching section to the worker instructions, so the brief only mentions tools the worker
+   * actually has. `openvikingUser` keeps the memory URIs in that section pointing at the
+   * tenant the viking tools enforce.
+   */
+  capabilities?: { peers?: boolean; openviking?: boolean; openvikingUser?: string }
 }
 
-export interface ResolvedSuperagentConfig extends Required<Omit<SuperagentConfig, 'scope' | 'log' | 'channel' | 'router' | 'worker' | 'assessor' | 'a2a' | 'watchdog'>> {
+export interface ResolvedSuperagentConfig extends Required<Omit<SuperagentConfig, 'scope' | 'log' | 'channel' | 'router' | 'worker' | 'assessor' | 'a2a' | 'watchdog' | 'capabilities'>> {
   router: { provider: string; model: string }
   worker: { provider: string; model: string }
   assessor: { baseUrl: string; apiKeyEnv: string }
@@ -120,6 +127,8 @@ export interface ResolvedSuperagentConfig extends Required<Omit<SuperagentConfig
   /** Turn-watchdog settings after defaults are applied. */
   watchdog: ResolvedSuperagentWatchdogConfig
   channel: SuperagentChannel
+  /** Capability switches after defaults are applied; every switch defaults to off. */
+  capabilities: { peers: boolean; openviking: boolean; openvikingUser: string }
   scope?(input: { source: string; meta: Record<string, unknown> }): ScopeResult
   log(message: string, detail?: unknown): void
 }
@@ -164,6 +173,11 @@ export function resolveSuperagentConfig(config: SuperagentConfig): ResolvedSuper
     replyLanguage: config.replyLanguage ?? '',
     scope: config.scope,
     log,
+    capabilities: {
+      peers: config.capabilities?.peers ?? false,
+      openviking: config.capabilities?.openviking ?? false,
+      openvikingUser: config.capabilities?.openvikingUser ?? 'default',
+    },
     a2a: {
       enabled: config.a2a?.enabled ?? false,
       port: config.a2a?.port ?? 18802,

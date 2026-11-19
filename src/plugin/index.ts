@@ -42,12 +42,17 @@ import { createRecallTool } from './recall.ts'
 import { createDeviceTool } from './device.ts'
 import { daemonBroker } from '../daemon/service.ts'
 import { requeueReactResult, ticketOfConversation, type ReactResultInput } from './react.ts'
-import { createWorkerTask, WorkerBridges, type WorkerTaskInput, type WorkerTaskState } from './worker.ts'
+import { createWorkerTask, WorkerBridges, workerInstructions, type WorkerTaskInput, type WorkerTaskState } from './worker.ts'
 
 /** The plugin: a plain extension (installable in any registry) plus the host-side handles. */
 export type SuperagentPlugin = Extension & {
   /** The domain store, for hosts and tests that read ticket state directly. */
   readonly store: Store
+  /**
+   * The worker system prompt: base instructions plus one section per installed capability
+   * (peers, openviking) — what the runtime's switches resolved to, visible for logs and tests.
+   */
+  readonly workerInstructions: string
   /** The ticket that owns a worker conversation, from the durable reverse index. */
   ticketOfConversation(conversationId: string): string | undefined
   /** Delivery hook: an ended ticket's finished background result re-enters the event flow. */
@@ -132,6 +137,7 @@ export function createSuperagentExtension(config: SuperagentConfig): SuperagentP
 
   const plugin: SuperagentPlugin = Object.assign(extension, {
     store,
+    workerInstructions: workerInstructions(cfg),
     ticketOfConversation: (conversationId: string): string | undefined => ticketOfConversation(store, conversationId),
     reactResult(input: ReactResultInput): void {
       // The delivery path may resolve the owner, but a hook called with only the conversation still works.

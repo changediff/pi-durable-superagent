@@ -1,6 +1,7 @@
 /** Environment-driven configuration for the pi-durable super-agent port. */
 import { z } from 'zod'
 import { OPENVIKING_DEFAULT_ENDPOINT, OPENVIKING_DEFAULT_PEER } from '../plugin/openviking.ts'
+import { PEER_COW_URL, PEER_HERMES_URL, PEER_DEFAULT_TIMEOUT_MS, PEER_MAX_TIMEOUT_MS } from '../plugin/peers.ts'
 
 const csv = (value: string | undefined): string[] =>
   (value ?? '').split(',').map(item => item.trim()).filter(Boolean)
@@ -76,6 +77,20 @@ export const ConfigSchema = z.object({
     user: z.string(),
   }),
 
+  /**
+   * Outbound peer agents (`peer_*` tools, design doc §014 cut 2). Off unless `SUP_PEERS=on`;
+   * the two peers are builtin, so this section may only override their URLs, tokens and the
+   * shared timeout — never add an unknown peer. Tokens come from the environment, headers only.
+   */
+  peers: z.object({
+    enabled: z.boolean(),
+    hermesUrl: z.string().url(),
+    hermesToken: z.string(),
+    cowUrl: z.string().url(),
+    cowToken: z.string(),
+    timeoutMs: z.number().int().positive().max(PEER_MAX_TIMEOUT_MS),
+  }),
+
   /** A2A (agent-to-agent) section passed whole to the plugin; disabled unless `SUP_A2A` is set. */
   a2a: z.object({
     enabled: z.boolean(),
@@ -138,6 +153,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       peer: env.SUP_OPENVIKING_PEER || OPENVIKING_DEFAULT_PEER,
       account: env.SUP_OPENVIKING_ACCOUNT || 'default',
       user: env.SUP_OPENVIKING_USER || 'default',
+    },
+    peers: {
+      enabled: truthy(env.SUP_PEERS),
+      hermesUrl: env.SUP_PEER_HERMES_URL || PEER_HERMES_URL,
+      hermesToken: env.SUP_PEER_HERMES_TOKEN || '',
+      cowUrl: env.SUP_PEER_COW_URL || PEER_COW_URL,
+      cowToken: env.SUP_PEER_COW_TOKEN || '',
+      // The configured budget is capped like the caller-facing timeoutSec: 900s at most.
+      timeoutMs: Math.min(Number(env.SUP_PEER_TIMEOUT_MS || PEER_DEFAULT_TIMEOUT_MS), PEER_MAX_TIMEOUT_MS),
     },
     a2a: {
       enabled: truthy(env.SUP_A2A),
