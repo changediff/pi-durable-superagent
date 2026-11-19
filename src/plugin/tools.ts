@@ -8,6 +8,7 @@ import { defineTool } from '@earendil-works/pi-durable'
 import type { ToolExecutionApi } from '@earendil-works/pi-durable'
 import { arr, obj, oneOf, opt, str } from '@earendil-works/pi-schema'
 import { UserError, type Engine, type Trigger } from '../core/index.ts'
+import { callPeer } from '../pi/a2a-client.ts'
 import type { Store } from '../app/store.ts'
 import type { ResolvedSuperagentConfig } from './config.ts'
 import type { PluginExecutor } from './executor.ts'
@@ -21,7 +22,7 @@ export interface ToolDeps {
   bridges: WorkerBridges
 }
 
-export const SUPERAGENT_TOOLS = ['superagent_dispatch', 'superagent_status', 'superagent_cancel', 'superagent_report'] as const
+export const SUPERAGENT_TOOLS = ['superagent_dispatch', 'superagent_status', 'superagent_cancel', 'superagent_report', 'a2a_send'] as const
 
 /** The system prompt section that documents the surface (rendered into every conversation selecting the extension). */
 export const SUPERAGENT_SECTION = `You are connected to the super-agent (超级智能体) Router surface.
@@ -30,6 +31,7 @@ export const SUPERAGENT_SECTION = `You are connected to the super-agent (超级�
 - superagent_status: list open and ended tickets with their assignment state and last worker report.
 - superagent_cancel: stop a ticket's worker (the domain ends the ticket; no result is delivered).
 - superagent_report: worker-side only. A worker conversation reports its state (ready, blocked, failed, ...) with a summary; workers call it when they cannot finish, or to report completion early.
+- a2a_send: call another A2A agent (peer) by its configured name and return its answer text. Peers come from the plugin's a2a.peers configuration; an unknown peer or a failed call returns an error message instead of throwing.
 
 Workers run in their own conversations with coding tools and do the actual work; their final message is delivered back verbatim. Reply and worker language follows the user's language (中文请求用中文回复).`
 
@@ -37,6 +39,7 @@ const DISPATCH = 'superagent_dispatch'
 const STATUS = 'superagent_status'
 const CANCEL = 'superagent_cancel'
 const REPORT = 'superagent_report'
+const A2A_SEND = 'a2a_send'
 
 export interface DispatchArgs {
   title: string
@@ -156,7 +159,31 @@ export function createSuperagentTools(deps: ToolDeps) {
     },
   })
 
-  return [dispatch, status, cancel, report]
+  const a2aSend = defineTool({
+    name: A2A_SEND,
+    description: '调用另一个 A2A agent（peer），返回它的回答文本。peer 名字来自插件配置 a2a.peers。',
+    parameters: obj({
+      peer: str({ description: 'Peer name as configured in a2a.peers (e.g. "hermes")' }),
+      text: str({ description: 'The message text to send to the peer agent' }),
+      context: opt(str({ description: 'A2A context id to continue a prior conversation; omit to start a new one' })),
+    }),
+    execute: async args => {
+      const peers = deps.cfg.a2a.peers
+      const peer = peers.find(candidate => candidate.name === args.peer)
+      if (!peer) {
+        const known = peers.length ? peers.map(candidate => candidate.name).join(', ') : '(none configured)'
+        return { isError: true, output: [{ type: 'text', text: `a2a_send: unknown peer "${args.peer}"; configured peers: ${known}` }] }
+      }
+      try {
+        const result = await callPeer(peer, args.text, args.context)
+        return { output: [{ type: 'text', text: result.text || `(peer "${peer.name}" returned no text; task state ${result.state || 'unknown'})` }] }
+      } catch (error) {
+        return { isError: true, output: [{ type: 'text', text: `a2a_send: calling peer "${peer.name}" failed: ${String((error as Error)?.message ?? error)}` }] }
+      }
+    },
+  })
+
+  return [dispatch, status, cancel, report, a2aSend]
 }
 
 /** The Trigger a dispatch records: a direct, human request on the caller's channel. */

@@ -16,17 +16,51 @@ import { CodingTools } from '@earendil-works/pi-durable/tools'
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node'
 import { openNodeJsonlStorage } from '@earendil-works/pi-durable/storage/jsonl/node'
 import type { Trigger } from '../core/index.ts'
+import type { OutboundMessage } from '../core/index.ts'
+import type { ScopeResult } from '../core/index.ts'
 import { HealthBoard } from '../infra/health.ts'
 import { createSuperagentExtension, type SuperagentPlugin } from '../plugin/index.ts'
 import type { Config } from './config.ts'
 import { FeishuSource } from './feishu.ts'
 import type { ChannelPort } from './channel.ts'
+import { A2AChannel } from './a2a.ts'
 import { buildModels } from './models.ts'
 
 export interface RuntimeOptions {
   log?: (message: string, detail?: unknown) => void
   /** Injected for `--selftest`; defaults to the Feishu WebSocket source. */
   channel?: ChannelPort
+}
+
+/** Fan out one logical channel over the primary source and the optional A2A server. */
+class CompositeChannel implements ChannelPort {
+  constructor(private readonly primary: ChannelPort, private readonly a2a?: ChannelPort) {}
+
+  async start(): Promise<void> {
+    await this.primary.start?.()
+    await this.a2a?.start?.()
+  }
+
+  async stop(): Promise<void> {
+    await this.primary.stop?.()
+    await this.a2a?.stop?.()
+  }
+
+  async send(message: OutboundMessage): Promise<'sent' | 'gone' | 'waiting'> {
+    if (message.channel.source === 'a2a') {
+      if (!this.a2a) return 'gone'
+      return this.a2a.send(message)
+    }
+    return this.primary.send(message)
+  }
+
+  scope(input: { source: string; meta: Record<string, unknown> }): ScopeResult {
+    if (input.source === 'a2a') {
+      if (!this.a2a) return { listened: false, reason: 'a2a disabled' }
+      return this.a2a.scope(input)
+    }
+    return this.primary.scope(input)
+  }
 }
 
 export class PiSuperagentRuntime {
@@ -51,12 +85,16 @@ export class PiSuperagentRuntime {
       scope: input => this.channel.scope(input),
       allowAll: cfg.allowAll,
       allowedActors: cfg.allowedOpenIds,
+      trustedSources: cfg.a2a.enabled ? ['a2a'] : [],
       unaddressedAdmission: cfg.unaddressedAdmission,
       assessor: { baseUrl: cfg.baseUrl, apiKeyEnv: cfg.apiKeyEnv },
       replyLanguage: cfg.replyLanguage,
+      a2a: cfg.a2a,
       log,
     })
-    this.channel = this.options.channel ?? new FeishuSource(cfg, { onTrigger: trigger => this.plugin.ingest(trigger), log })
+    const primary = this.options.channel ?? new FeishuSource(cfg, { onTrigger: trigger => this.plugin.ingest(trigger), log })
+    const a2a = cfg.a2a.enabled ? new A2AChannel(cfg.a2a, { onTrigger: trigger => this.plugin.ingest(trigger), log }) : undefined
+    this.channel = a2a ? new CompositeChannel(primary, a2a) : primary
     this.registry.install(CodingTools)
     this.registry.install(this.plugin)
   }
@@ -77,6 +115,7 @@ export class PiSuperagentRuntime {
     await this.plugin.start()
     // Long connections are the only inbound path; a failed start must fail the process, not idle silently.
     await this.channel.start?.()
+    if (cfg.a2a.enabled) this.log('a2a ready', { url: cfg.a2a.publicUrl })
     this.board.claim('runtime', { state: 'ready', detail: 'super-agent ready', at: new Date().toISOString() })
     this.log('runtime ready', {
       state: cfg.stateDir,

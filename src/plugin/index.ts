@@ -179,27 +179,41 @@ function defaultScope(input: { meta: Record<string, unknown> }): ScopeResult {
     : { listened: true, observed: true, row: 'group' }
 }
 
-/** Seed the first settings revision from the config: eval mode, worker cap and the sender policy. */
+/** Seed the first settings revision from the config, then backfill trusted sources idempotently. */
 function bootstrapSettings(store: Store, cfg: ReturnType<typeof resolveSuperagentConfig>): void {
-  if (store.settingsHistory(1).length) return
+  const trustedEntries = (): Record<string, { allowed: []; allowAll: true; admission: {} }> =>
+    Object.fromEntries(cfg.trustedSources.map(source => [source, { allowed: [], allowAll: true, admission: {} }]))
+  const seeded = store.settingsHistory(1).length > 0
   const current = store.settings()
-  store.saveSettings({
-    ...current,
-    eval: { ...current.eval, mode: cfg.evalMode },
-    executor: { ...current.executor, maxWorkers: cfg.maxWorkers },
-    policy: {
-      ...current.policy,
-      sources: {
-        ...current.policy.sources,
-        [cfg.source]: {
-          ...(current.policy.sources[cfg.source] ?? {}),
-          allowed: cfg.allowedActors.map(id => ({ id })),
-          allowAll: cfg.allowAll,
-          admission: { group: { listedUnaddressed: cfg.unaddressedAdmission } },
+  if (!seeded) {
+    store.saveSettings({
+      ...current,
+      eval: { ...current.eval, mode: cfg.evalMode },
+      executor: { ...current.executor, maxWorkers: cfg.maxWorkers },
+      policy: {
+        ...current.policy,
+        sources: {
+          ...current.policy.sources,
+          [cfg.source]: {
+            ...(current.policy.sources[cfg.source] ?? {}),
+            allowed: cfg.allowedActors.map(id => ({ id })),
+            allowAll: cfg.allowAll,
+            admission: { group: { listedUnaddressed: cfg.unaddressedAdmission } },
+          },
+          ...trustedEntries(),
         },
       },
-    },
-  }, { source: 'internal', policyVersion: '', policyChanged: true, notified: [] })
+    })
+    return
+  }
+  // Old stores predating trustedSources: add any missing entries without touching the existing ones.
+  const missing = cfg.trustedSources.filter(source => !current.policy.sources[source])
+  if (!missing.length) return
+  store.saveSettings({
+    ...current,
+    policy: { ...current.policy, sources: { ...current.policy.sources, ...Object.fromEntries(missing.map(source => [source, { allowed: [], allowAll: true, admission: {} }])) } },
+  })
+  cfg.log('settings backfilled trusted sources', missing)
 }
 
 export { SUPERAGENT_TOOLS } from './tools.ts'

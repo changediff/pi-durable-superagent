@@ -14,6 +14,39 @@ export interface SuperagentChannel {
   send(message: OutboundMessage): Promise<'sent' | 'gone' | 'waiting'>
 }
 
+export interface A2APeerConfig {
+  name: string
+  url: string
+  token?: string
+  timeout?: number
+}
+
+/** Agent-to-agent settings owned by the plugin: inbound semantics plus the outbound peer table. */
+export interface SuperagentA2AConfig {
+  /** Run the inbound A2A JSON-RPC surface; default false. */
+  enabled?: boolean
+  /** Listen port of the inbound server; default 18802. */
+  port?: number
+  /** Bearer token inbound callers must present; empty accepts unauthenticated calls. */
+  token?: string
+  /** URL published in the agent card. */
+  publicUrl?: string
+  /** How long an inbound SendMessage waits for the final reply; default 100000ms. */
+  waitMs?: number
+  /** Named peer agents the `a2a_send` tool may call. */
+  peers?: A2APeerConfig[]
+}
+
+/** The a2a section after defaults are applied. */
+export interface ResolvedSuperagentA2AConfig {
+  enabled: boolean
+  port: number
+  token: string
+  publicUrl: string
+  waitMs: number
+  peers: A2APeerConfig[]
+}
+
 export interface SuperagentConfig {
   /** Directory of the SQLite domain store (`orchestrator.sqlite`); the plugin locks it exclusively. */
   stateDir: string
@@ -39,6 +72,8 @@ export interface SuperagentConfig {
   allowAll?: boolean
   /** Explicitly allowed actor ids when `allowAll` is false. */
   allowedActors?: string[]
+  /** Sources whose senders are trusted wholesale (allowAll) in the settings policy, e.g. `a2a`. */
+  trustedSources?: string[]
   /** Admission for listed senders that do not address the agent; default `ignore`. */
   unaddressedAdmission?: 'ignore' | 'inferred'
   /** GLM endpoint the Router assessor calls; default the Zhipu coding endpoint. */
@@ -49,12 +84,16 @@ export interface SuperagentConfig {
   replyLanguage?: string
   /** Structured log; default `console.log` prefixed `[superagent]`. */
   log?(message: string, detail?: unknown): void
+  /** Agent-to-agent settings: inbound server behavior and the outbound peer table. */
+  a2a?: SuperagentA2AConfig
 }
 
-export interface ResolvedSuperagentConfig extends Required<Omit<SuperagentConfig, 'scope' | 'log' | 'channel' | 'router' | 'worker' | 'assessor'>> {
+export interface ResolvedSuperagentConfig extends Required<Omit<SuperagentConfig, 'scope' | 'log' | 'channel' | 'router' | 'worker' | 'assessor' | 'a2a'>> {
   router: { provider: string; model: string }
   worker: { provider: string; model: string }
   assessor: { baseUrl: string; apiKeyEnv: string }
+  /** Agent-to-agent settings after defaults are applied. */
+  a2a: ResolvedSuperagentA2AConfig
   channel: SuperagentChannel
   scope?(input: { source: string; meta: Record<string, unknown> }): ScopeResult
   log(message: string, detail?: unknown): void
@@ -82,6 +121,7 @@ export function resolveSuperagentConfig(config: SuperagentConfig): ResolvedSuper
     source: config.source ?? 'feishu',
     allowAll: config.allowAll ?? true,
     allowedActors: config.allowedActors ?? [],
+    trustedSources: config.trustedSources ?? [],
     unaddressedAdmission: config.unaddressedAdmission ?? 'ignore',
     assessor: {
       baseUrl: config.assessor?.baseUrl ?? DEFAULT_ASSESSOR_BASE,
@@ -91,5 +131,13 @@ export function resolveSuperagentConfig(config: SuperagentConfig): ResolvedSuper
     replyLanguage: config.replyLanguage ?? '',
     scope: config.scope,
     log,
+    a2a: {
+      enabled: config.a2a?.enabled ?? false,
+      port: config.a2a?.port ?? 18802,
+      token: config.a2a?.token ?? '',
+      publicUrl: config.a2a?.publicUrl ?? `http://127.0.0.1:${config.a2a?.port ?? 18802}`,
+      waitMs: config.a2a?.waitMs ?? 100_000,
+      peers: config.a2a?.peers ?? [],
+    },
   }
 }

@@ -4,6 +4,8 @@
 # rootfs, no published ports, outbound Feishu/GLM only.
 set -euo pipefail
 docker rm -f pi-agent 2>/dev/null || true
+# A2A: SUP_A2A / SUP_A2A_PORT / SUP_A2A_TOKEN / SUP_A2A_PUBLIC_URL / SUP_A2A_PEERS come from
+# /etc/piagent.env; the port is published on the tailnet IP only.
 docker run -d \
   --name pi-agent \
   --restart unless-stopped \
@@ -12,6 +14,7 @@ docker run -d \
   --cap-drop ALL \
   --tmpfs /tmp:rw,size=512m \
   --env-file /etc/piagent.env \
+  -p 100.68.159.13:18802:18802 \
   -e SUP_STATE_DIR=/workspace/.superagent \
   -e SUP_HARNESS_DIR=/workspace/.superagent/harness \
   -e SUP_WORK_DIR=/work \
@@ -25,7 +28,7 @@ docker run -d \
   --volume /data/piagent-workspace:/workspace \
   --volume /data/piagent-work:/work \
   --workdir /work \
-  changediff/pi-agent:superagent-plugin2
+  changediff/pi-agent:superagent-plugin5
 echo "pi-agent started on changediff/pi-agent:superagent-plugin (hardened)."
 # Rollback: rebuild the previous image tag changediff/pi-agent:superagent from git and repoint this
 # script at it (it still exists until pruned).

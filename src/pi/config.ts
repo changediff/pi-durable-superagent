@@ -41,6 +41,22 @@ export const ConfigSchema = z.object({
   listenAllChats: z.boolean(),
   /** Reply language hint passed to the worker ("", "zh", "en"). */
   replyLanguage: z.string().default(''),
+
+  /** A2A (agent-to-agent) section passed whole to the plugin; disabled unless `SUP_A2A` is set. */
+  a2a: z.object({
+    enabled: z.boolean(),
+    port: z.number().int().min(1).max(65535),
+    token: z.string(),
+    /** AgentCard 里对外公布的地址 */
+    publicUrl: z.string(),
+    waitMs: z.number().int().positive(),
+    peers: z.array(z.object({
+      name: z.string(),
+      url: z.string(),
+      token: z.string().default(''),
+      timeout: z.number().int().positive().default(100),
+    })),
+  }),
 })
 
 export type Config = z.infer<typeof ConfigSchema>
@@ -69,5 +85,30 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     allowedOpenIds: csv(env.SUP_ALLOWED_OPEN_IDS || env.FEISHU_ALLOWED_OPEN_IDS),
     listenAllChats: truthy(env.SUP_LISTEN_ALL_CHATS),
     replyLanguage: env.SUP_REPLY_LANGUAGE || '',
+    a2a: {
+      enabled: truthy(env.SUP_A2A),
+      port: Number(env.SUP_A2A_PORT || 18802),
+      token: env.SUP_A2A_TOKEN || '',
+      publicUrl: env.SUP_A2A_PUBLIC_URL || `http://cc2.pig-bowfin.ts.net:${Number(env.SUP_A2A_PORT || 18802)}`,
+      waitMs: Number(env.SUP_A2A_WAIT_MS || 100000),
+      peers: parsePeers(env.SUP_A2A_PEERS),
+    },
   })
+}
+
+/** `SUP_A2A_PEERS` JSON array; a parse failure yields no peers instead of failing startup. */
+function parsePeers(value: string | undefined): Config['a2a']['peers'] {
+  if (!value) return []
+  try {
+    const parsed: unknown = JSON.parse(value)
+    const result = z.array(z.object({
+      name: z.string(),
+      url: z.string(),
+      token: z.string().default(''),
+      timeout: z.number().int().positive().default(100),
+    })).parse(parsed)
+    return result
+  } catch {
+    return []
+  }
 }

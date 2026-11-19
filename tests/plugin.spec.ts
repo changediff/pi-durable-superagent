@@ -8,6 +8,8 @@ import { createModels } from '@earendil-works/pi-ai/models'
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from '@earendil-works/pi-ai'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createSuperagentExtension, SUPERAGENT_TOOLS, type SuperagentConfig } from '../src/plugin/index.ts'
+import { settingsPolicy } from '../src/policy.ts'
+import type { Thread, Trigger } from '../src/core/index.ts'
 import { workerConversationKey } from '../src/plugin/worker.ts'
 
 /** A fake channel: records what the plugin delivers, never Feishu. */
@@ -48,6 +50,44 @@ describe('the superagent extension', () => {
     const text = await plugin.sections![0]!.render({} as never, {} as never)
     for (const name of SUPERAGENT_TOOLS) expect(text).toContain(name)
     expect(text).toContain("follows the user's language")
+  })
+})
+
+describe('trusted a2a sources and the policy gate', () => {
+  const a2aScope = { scope: () => ({ listened: true as const, observed: false, row: 'a2a' }) }
+  const a2aTrigger: Trigger = {
+    id: 'a2a-1', source: 'a2a', threads: [{ source: 'a2a', id: 'ctx-1' }], actor: { source: 'a2a', id: 'hermes-peer' },
+    human: true, addressed: 'direct', at: '2026-01-01T00:00:00.000Z', text: 'do something', meta: {},
+  }
+  const a2aThread: Thread = {
+    key: 'a2a:ctx-1', ref: { source: 'a2a', id: 'ctx-1' }, createdAt: '2026-01-01T00:00:00.000Z',
+    subscriptions: [], correlated: [], pending: [], meta: {},
+  }
+
+  it('seeds a trustedSources entry so an a2a Trigger passes the real policy gate', () => {
+    const plugin = createSuperagentExtension({ ...config(), trustedSources: ['a2a'] })
+    const settings = plugin.store.settings()
+    expect(settings.policy.sources['a2a']).toMatchObject({ allowAll: true })
+    const policy = settingsPolicy(settings, a2aScope)
+    expect(policy.gate(a2aTrigger, a2aThread, [])).toMatchObject({ admissible: true, strength: 'explicit' })
+  })
+
+  it('refuses the same Trigger without a trustedSources entry (the old filtering bug)', () => {
+    const plugin = createSuperagentExtension(config())
+    const policy = settingsPolicy(plugin.store.settings(), a2aScope)
+    expect(policy.gate(a2aTrigger, a2aThread, []).admissible).toBe(false)
+  })
+
+  it('backfills a missing trustedSource into an existing settings history without touching the rest', async () => {
+    const stateDir = join(directory, 'state')
+    const first = createSuperagentExtension({ ...config(), stateDir })
+    expect(first.store.settings().policy.sources['a2a']).toBeUndefined()
+    await first.stop()
+    const logs: unknown[][] = []
+    const second = createSuperagentExtension({ ...config(), stateDir, trustedSources: ['a2a'], log: (m, d) => logs.push([m, d]) })
+    expect(second.store.settings().policy.sources['a2a']).toMatchObject({ allowAll: true })
+    expect(logs.some(([m, d]) => m === 'settings backfilled trusted sources' && JSON.stringify(d) === '["a2a"]')).toBe(true)
+    await second.stop()
   })
 })
 
