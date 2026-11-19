@@ -50,6 +50,15 @@ export const ConfigSchema = z.object({
   /** Reply language hint passed to the worker ("", "zh", "en"). */
   replyLanguage: z.string().default(''),
 
+  /**
+   * BYOM device daemon surface (`POST /daemon/*`), mounted on the A2A listener. Enabled by
+   * `SUP_DAEMON=on`; every request must carry `Authorization: Bearer $SUP_DAEMON_TOKEN`.
+   */
+  daemon: z.object({
+    enabled: z.boolean(),
+    token: z.string(),
+  }),
+
   /** A2A (agent-to-agent) section passed whole to the plugin; disabled unless `SUP_A2A` is set. */
   a2a: z.object({
     enabled: z.boolean(),
@@ -100,6 +109,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     allowedOpenIds: csv(env.SUP_ALLOWED_OPEN_IDS || env.FEISHU_ALLOWED_OPEN_IDS),
     listenAllChats: truthy(env.SUP_LISTEN_ALL_CHATS),
     replyLanguage: env.SUP_REPLY_LANGUAGE || '',
+    daemon: {
+      enabled: truthy(env.SUP_DAEMON),
+      // Empty token rejects every daemon request: the surface is never open without a bearer.
+      token: env.SUP_DAEMON_TOKEN || '',
+    },
     a2a: {
       enabled: truthy(env.SUP_A2A),
       port: Number(env.SUP_A2A_PORT || 18802),

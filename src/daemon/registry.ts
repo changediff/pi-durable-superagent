@@ -20,6 +20,8 @@ export interface QueuedWork {
   ticketId: string
   brief: string
   workdir: string
+  /** When set, only this device may lease the entry (a caller pinned its work to one device). */
+  device?: string
 }
 
 /** Reads currently assignable work; a ticket already leased is skipped even if still listed. */
@@ -35,6 +37,10 @@ export interface RegistryOptions {
   maxSlots?: number
   /** Poll path handed back by `register`. */
   pollPath?: string
+  /** Called when work is leased, so the queue owner can remember the server-issued assignment id. */
+  onLease?: (assignment: Assignment) => void
+  /** Called once when a result is recorded (duplicates do not fire it). */
+  onComplete?: (result: DaemonResult) => void
 }
 
 /** Outcome of a result report: `duplicate` means it was already recorded and nothing changed. */
@@ -78,6 +84,8 @@ export class DaemonRegistry {
   private readonly leaseMs: number
   private readonly maxSlots: number
   private readonly pollPath: string
+  private readonly onLease: ((assignment: Assignment) => void) | undefined
+  private readonly onComplete: ((result: DaemonResult) => void) | undefined
   private readonly devices = new Map<string, Device>()
   private readonly assignments = new Map<string, ActiveAssignment>()
   /** Tickets with a live lease, so the same queue entry cannot be handed out twice. */
@@ -93,6 +101,8 @@ export class DaemonRegistry {
     this.leaseMs = options.leaseMs ?? DEFAULT_LEASE_MS
     this.maxSlots = options.maxSlots ?? MAX_SLOTS
     this.pollPath = options.pollPath ?? '/daemon/poll'
+    this.onLease = options.onLease
+    this.onComplete = options.onComplete
   }
 
   /** Announce or re-announce a device; returns the granted slots and lease length. */
@@ -145,7 +155,7 @@ export class DaemonRegistry {
     const device = this.devices.get(deviceId)
     if (!device) return undefined
     if (this.activeFor(deviceId) >= device.slots) return undefined
-    const work = this.nextWork()
+    const work = this.nextWork(deviceId)
     if (!work) return undefined
     const deadline = this.now() + this.leaseMs
     const assignment: Assignment = {
@@ -157,6 +167,7 @@ export class DaemonRegistry {
     }
     this.assignments.set(assignment.assignmentId, { assignment, deviceId, deadline })
     this.assignedTickets.add(work.ticketId)
+    this.onLease?.(assignment)
     return assignment
   }
 
@@ -178,7 +189,18 @@ export class DaemonRegistry {
     this.assignments.delete(result.assignmentId)
     this.assignedTickets.delete(active.assignment.ticketId)
     this.completed.set(result.assignmentId, result)
+    this.onComplete?.(result)
     return { ok: true, duplicate: false, assignmentId: result.assignmentId, status: result.status }
+  }
+
+  /** The device currently holding an assignment lease, if the assignment is still live. */
+  deviceOf(assignmentId: string): string | undefined {
+    return this.assignments.get(assignmentId)?.deviceId
+  }
+
+  /** A previously completed result, so a retry can be acknowledged without a live lease. */
+  completedResult(assignmentId: string): DaemonResult | undefined {
+    return this.completed.get(assignmentId)
   }
 
   /** Return every assignment whose lease lapsed to the queue; returns the reclaimed IDs. */
@@ -199,6 +221,12 @@ export class DaemonRegistry {
   online(deviceId: string): boolean {
     const device = this.devices.get(deviceId)
     return device !== undefined && this.now() < device.leaseUntil
+  }
+
+  /** Devices whose lease is still live; the device tool refuses to queue work without one. */
+  onlineDevices(): string[] {
+    const now = this.now()
+    return [...this.devices.values()].filter(device => now < device.leaseUntil).map(device => device.deviceId)
   }
 
   /** Counters for logs and tests; does not mutate registry state. */
@@ -229,10 +257,12 @@ export class DaemonRegistry {
     return count
   }
 
-  private nextWork(): QueuedWork | undefined {
+  private nextWork(deviceId: string): QueuedWork | undefined {
     const seen = new Set<string>()
     for (const work of this.queue()) {
       if (!work?.ticketId || seen.has(work.ticketId) || this.assignedTickets.has(work.ticketId)) continue
+      // A caller that pinned its work to one device never hands it to another.
+      if (work.device && work.device !== deviceId) continue
       seen.add(work.ticketId)
       return work
     }

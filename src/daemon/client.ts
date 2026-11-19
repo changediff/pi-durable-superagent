@@ -75,8 +75,10 @@ export class DeviceDaemon {
   private started = false
   private stopping = false
   private capacity: number
+  private readonly options: DeviceDaemonOptions
 
-  constructor(private readonly options: DeviceDaemonOptions) {
+  constructor(options: DeviceDaemonOptions) {
+    this.options = options
     this.transport = options.transport
     this.execute = options.execute
     this.clock = options.clock ?? (() => Date.now())

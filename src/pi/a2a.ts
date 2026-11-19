@@ -21,6 +21,11 @@ export interface A2AHost {
   log(message: string, detail?: unknown): void
 }
 
+/** The daemon route table mounted on the same listener; it owns its own bearer token. */
+export interface DaemonRoute {
+  handleNode(req: IncomingMessage, res: ServerResponse): Promise<boolean>
+}
+
 interface TaskRecord {
   id: string
   contextId: string
@@ -66,7 +71,14 @@ export class A2AChannel implements ChannelPort {
   private warnedOpen = false
   private readonly waitMs: number
 
-  constructor(private readonly cfg: ResolvedSuperagentA2AConfig, private readonly host: A2AHost) {
+  constructor(
+    private readonly cfg: ResolvedSuperagentA2AConfig,
+    private readonly host: A2AHost,
+    /** Mounted first: `/daemon/*` is served here instead of opening a second port. */
+    private readonly daemon?: DaemonRoute,
+    /** False when the server was started only for the daemon routes. */
+    private readonly a2aEnabled: boolean = cfg.enabled,
+  ) {
     this.waitMs = cfg.waitMs
   }
 
@@ -163,6 +175,15 @@ export class A2AChannel implements ChannelPort {
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       const path = req.url?.split('?')[0] ?? '/'
+      if (this.daemon && (path === '/daemon' || path.startsWith('/daemon/'))) {
+        await this.daemon.handleNode(req, res)
+        return
+      }
+      if (!this.a2aEnabled) {
+        res.writeHead(404, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: 'not found' }))
+        return
+      }
       if (req.method === 'GET' && (path === '/.well-known/agent-card.json' || path === '/.well-known/agent.json')) {
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify(this.agentCard()))

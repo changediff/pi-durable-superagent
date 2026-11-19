@@ -39,6 +39,8 @@ import { resolveSuperagentConfig, type SuperagentConfig } from './config.ts'
 import { PluginExecutor } from './executor.ts'
 import { createSuperagentTools, SUPERAGENT_SECTION } from './tools.ts'
 import { createRecallTool } from './recall.ts'
+import { createDeviceTool } from './device.ts'
+import { daemonBroker } from '../daemon/service.ts'
 import { requeueReactResult, ticketOfConversation, type ReactResultInput } from './react.ts'
 import { createWorkerTask, WorkerBridges, type WorkerTaskInput, type WorkerTaskState } from './worker.ts'
 
@@ -122,6 +124,7 @@ export function createSuperagentExtension(config: SuperagentConfig): SuperagentP
     tools: [
       ...createSuperagentTools({ store, cfg, engine: () => engineRef.current!, executor, bridges }),
       createRecallTool({ store, cfg, readConversation }),
+      createDeviceTool({ broker: daemonBroker(), workdir: cfg.workDir, log }),
     ],
     sections: [section('superagent', () => SUPERAGENT_SECTION, { tag: true })],
     tasks: [workerTask],

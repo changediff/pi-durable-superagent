@@ -25,6 +25,8 @@ import type { Config } from './config.ts'
 import { FeishuSource } from './feishu.ts'
 import type { ChannelPort } from './channel.ts'
 import { A2AChannel } from './a2a.ts'
+import { DaemonHttpApi } from '../daemon/http.ts'
+import { daemonBroker } from '../daemon/service.ts'
 import { buildModels } from './models.ts'
 
 export interface RuntimeOptions {
@@ -70,6 +72,10 @@ export class PiSuperagentRuntime {
   /** The async ReAct tools (start/stop/list), at the CodingTools layer so every session gets them. */
   readonly react: ReactExtension
   readonly registry = createRegistry()
+  /** The listener shared by A2A and `/daemon/*`; present when either surface is on. */
+  private readonly http?: A2AChannel
+  /** Whether the A2A channel already owns `http`'s lifecycle through `CompositeChannel`. */
+  private readonly a2aMounted: boolean
   private harness?: Harness
   private readonly board = new HealthBoard()
   private closed = false
@@ -102,8 +108,18 @@ export class PiSuperagentRuntime {
       log,
     })
     const primary = this.options.channel ?? new FeishuSource(cfg, { onTrigger: trigger => this.plugin.ingest(trigger), log })
-    const a2a = cfg.a2a.enabled ? new A2AChannel(cfg.a2a, { onTrigger: trigger => this.plugin.ingest(trigger), log }) : undefined
-    this.channel = a2a ? new CompositeChannel(primary, a2a) : primary
+    // One listener serves both surfaces: A2A JSON-RPC at its own paths, the device daemon at
+    // `/daemon/*` with a separate bearer token. That keeps the container's published port and the
+    // server lifecycle single, whether A2A is enabled, the daemon is, or both.
+    const daemonApi = cfg.daemon.enabled
+      ? new DaemonHttpApi({ registry: daemonBroker().registry, token: cfg.daemon.token, log })
+      : undefined
+    const http = cfg.a2a.enabled || cfg.daemon.enabled
+      ? new A2AChannel(cfg.a2a, { onTrigger: trigger => this.plugin.ingest(trigger), log }, daemonApi, cfg.a2a.enabled)
+      : undefined
+    this.http = http
+    this.a2aMounted = cfg.a2a.enabled && http !== undefined
+    this.channel = this.a2aMounted && http ? new CompositeChannel(primary, http) : primary
     this.react = createReactExtension({
       // Delivery resolves the harness lazily: the registry is built before the harness opens.
       session: async id => this.harness?.conversation(Number(id) as ConversationId, BACKGROUND_CONTEXT),
@@ -133,7 +149,11 @@ export class PiSuperagentRuntime {
     await this.plugin.start()
     // Long connections are the only inbound path; a failed start must fail the process, not idle silently.
     await this.channel.start?.()
+    if (this.http && !this.a2aMounted) await this.http.start()
     if (cfg.a2a.enabled) this.log('a2a ready', { url: cfg.a2a.publicUrl })
+    if (cfg.daemon.enabled) {
+      this.log('daemon routes ready', { port: cfg.a2a.port, auth: cfg.daemon.token ? 'bearer' : 'rejecting (no token)' })
+    }
     this.board.claim('runtime', { state: 'ready', detail: 'super-agent ready', at: new Date().toISOString() })
     this.log('runtime ready', {
       state: cfg.stateDir,
@@ -156,6 +176,7 @@ export class PiSuperagentRuntime {
     await this.plugin.stop()
     await this.harness?.close(BACKGROUND_CONTEXT).catch(() => {})
     await this.channel.stop?.()
+    if (this.http && !this.a2aMounted) await this.http.stop()
     this.log('runtime stopped')
   }
 
