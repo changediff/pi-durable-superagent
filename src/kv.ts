@@ -38,6 +38,8 @@ export const KV = {
     conversation: family<number, [ticket: string]>('watchdog-conv:'),
     verdicts: family<WatchdogVerdictRecord[], [ticket: string]>('watchdog-verdicts:'),
   },
+  /** Async ReAct: the ticket that owns each worker conversation, so a finished job can find it after a restart. */
+  react: { owner: family<string, [conversation: string]>('react-owner:') },
   /**
    * Feishu Source: known chats (`true` for direct messages); per-chat history cursor and active topics mapped from topic ID
    * to last-seen timestamp; and per-polled-thread seen message IDs and initialization flag.

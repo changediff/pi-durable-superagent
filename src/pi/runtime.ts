@@ -107,6 +107,9 @@ export class PiSuperagentRuntime {
     this.react = createReactExtension({
       // Delivery resolves the harness lazily: the registry is built before the harness opens.
       session: async id => this.harness?.conversation(Number(id) as ConversationId, BACKGROUND_CONTEXT),
+      // A result delivered after its ticket ended goes back into the domain as an event for Eval.
+      ticketOf: id => this.plugin.ticketOfConversation(String(id)),
+      onResult: input => this.plugin.reactResult(input),
       log,
     })
     this.registry.install(CodingTools)

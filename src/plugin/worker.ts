@@ -14,7 +14,7 @@ import { configure, defineTask, type ConversationHandle, type ConversationId, ty
 import type { Context } from '@earendil-works/chord/context'
 import { liveTicket, runningAssignment, threadKey, type Engine, type Ticket, type Trigger } from '../core/index.ts'
 import { record } from '../kv.ts'
-import { backgroundJobs } from './react.ts'
+import { backgroundJobs, reactOwnerKey } from './react.ts'
 import type { Store } from '../app/store.ts'
 import type { ResolvedSuperagentConfig } from './config.ts'
 import { lastAssistantText } from './transcript.ts'
@@ -259,7 +259,11 @@ async function workerConversation(
   const stored = store.get(key)
   if (stored) {
     const found = await runtime.conversation(stored as ConversationId, context)
-    if (found) return found
+    if (found) {
+      // Heal the reverse index for conversations created before it existed.
+      store.set(reactOwnerKey(String(found.id)), ticket.id)
+      return found
+    }
   }
   const directory = join(cfg.workDir, 'superagent', ticket.id)
   await mkdir(directory, { recursive: true })
@@ -278,6 +282,8 @@ async function workerConversation(
   }, context)
   const id = conversationId!
   store.set(key, id)
+  // Reverse index, durable across restarts: a finished background job finds its ticket from the conversation.
+  store.set(reactOwnerKey(String(id)), ticket.id)
   cfg.log('worker conversation created', `${ticket.id} -> ${id}`)
   const handle = await runtime.conversation(id, context)
   if (!handle) throw new Error(`worker conversation ${ticket.id} missing from storage`)

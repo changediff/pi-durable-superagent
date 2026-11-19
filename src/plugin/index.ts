@@ -39,12 +39,17 @@ import { resolveSuperagentConfig, type SuperagentConfig } from './config.ts'
 import { PluginExecutor } from './executor.ts'
 import { createSuperagentTools, SUPERAGENT_SECTION } from './tools.ts'
 import { createRecallTool } from './recall.ts'
+import { requeueReactResult, ticketOfConversation, type ReactResultInput } from './react.ts'
 import { createWorkerTask, WorkerBridges, type WorkerTaskInput, type WorkerTaskState } from './worker.ts'
 
 /** The plugin: a plain extension (installable in any registry) plus the host-side handles. */
 export type SuperagentPlugin = Extension & {
   /** The domain store, for hosts and tests that read ticket state directly. */
   readonly store: Store
+  /** The ticket that owns a worker conversation, from the durable reverse index. */
+  ticketOfConversation(conversationId: string): string | undefined
+  /** Delivery hook: an ended ticket's finished background result re-enters the event flow. */
+  reactResult(input: ReactResultInput): void
   /** Connect the harness the plugin's extension is installed into; required before `start()`. */
   bind(harness: Harness): void
   /** Feed one Trigger through the same path a source uses: intake, gate, eval, dispatch. */
@@ -84,7 +89,12 @@ export function createSuperagentExtension(config: SuperagentConfig): SuperagentP
     workerTask: () => workerTask,
     harness: () => harnessRef.current,
   })
-  const scope = { scope: (input: { source: string; meta: Record<string, unknown> }) => channel.scope(input) }
+  // Background results are senderless system events: the gate admits them as observed candidates on
+  // their Thread so an Eval (and the main Session) can decide whether the ended ticket resumes.
+  const scope = {
+    scope: (input: { source: string; meta: Record<string, unknown> }): ScopeResult =>
+      input.source === 'react' ? { listened: true, observed: true, row: 'system' } : channel.scope(input),
+  }
   const engine = new Engine({
     repo: store,
     policy: () => settingsPolicy(store.settings(), scope),
@@ -119,6 +129,18 @@ export function createSuperagentExtension(config: SuperagentConfig): SuperagentP
 
   const plugin: SuperagentPlugin = Object.assign(extension, {
     store,
+    ticketOfConversation: (conversationId: string): string | undefined => ticketOfConversation(store, conversationId),
+    reactResult(input: ReactResultInput): void {
+      // The delivery path may resolve the owner, but a hook called with only the conversation still works.
+      const ticketId = input.ticketId ?? ticketOfConversation(store, input.conversationId)
+      requeueReactResult({
+        ticket: id => store.tickets.get(id),
+        threads: () => store.threads.list(),
+        trigger: id => store.triggers.get(id),
+        receive: trigger => engine.receive(trigger),
+        log,
+      }, { ...input, ticketId })
+    },
     bind(harness: Harness): void {
       harnessRef.current = harness
       void executor.drain(BACKGROUND_CONTEXT).catch(error => log('worker launch failed', String(error)))
@@ -205,6 +227,9 @@ function defaultScope(input: { meta: Record<string, unknown> }): ScopeResult {
 function bootstrapSettings(store: Store, cfg: ReturnType<typeof resolveSuperagentConfig>): void {
   const trustedEntries = (): Record<string, { allowed: []; allowAll: true; admission: {} }> =>
     Object.fromEntries(cfg.trustedSources.map(source => [source, { allowed: [], allowAll: true, admission: {} }]))
+  // The synthetic Source of background-job results: a senderless system event admitted as an inferred candidate.
+  const reactSource = (): { allowed: []; allowAll: false; admission: { system: { unlistedUnaddressed: 'inferred' } } } =>
+    ({ allowed: [], allowAll: false, admission: { system: { unlistedUnaddressed: 'inferred' } } })
   const seeded = store.settingsHistory(1).length > 0
   const current = store.settings()
   if (!seeded) {
@@ -223,23 +248,30 @@ function bootstrapSettings(store: Store, cfg: ReturnType<typeof resolveSuperagen
             admission: { group: { listedUnaddressed: cfg.unaddressedAdmission } },
           },
           ...trustedEntries(),
+          react: reactSource(),
         },
       },
     })
     return
   }
-  // Old stores predating trustedSources: add any missing entries without touching the existing ones.
-  const missing = cfg.trustedSources.filter(source => !current.policy.sources[source])
-  if (!missing.length) return
+  // Old stores predating trustedSources or the react Source: add any missing entries without touching the others.
+  const missing: Record<string, ReturnType<typeof reactSource> | { allowed: []; allowAll: true; admission: {} }> = {}
+  for (const source of cfg.trustedSources) {
+    if (!current.policy.sources[source]) missing[source] = { allowed: [], allowAll: true, admission: {} }
+  }
+  if (!current.policy.sources['react']) missing['react'] = reactSource()
+  const added = Object.keys(missing)
+  if (!added.length) return
   store.saveSettings({
     ...current,
-    policy: { ...current.policy, sources: { ...current.policy.sources, ...Object.fromEntries(missing.map(source => [source, { allowed: [], allowAll: true, admission: {} }])) } },
+    policy: { ...current.policy, sources: { ...current.policy.sources, ...missing } },
   })
-  cfg.log('settings backfilled trusted sources', missing)
+  cfg.log('settings backfilled trusted sources', added)
 }
 
 export { SUPERAGENT_TOOLS } from './tools.ts'
 export type { SuperagentConfig, SuperagentChannel, EvalMode } from './config.ts'
 export type { WorkerTaskInput } from './worker.ts'
 export { runningAssignments } from './worker.ts'
+export { requeueReactResult, type ReactResultInput } from './react.ts'
 export default createSuperagentExtension

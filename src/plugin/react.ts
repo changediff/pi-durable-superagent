@@ -17,6 +17,8 @@ import type { Context } from '@earendil-works/chord/context'
 import { defineExtension, defineTool, section } from '@earendil-works/pi-durable'
 import type { Extension, ToolExecutionApi } from '@earendil-works/pi-durable'
 import { int, num, obj, opt, str } from '@earendil-works/pi-schema'
+import { liveTicket, threadKey, type Thread, type Ticket, type Trigger } from '../core/index.ts'
+import { KV, type Key } from '../kv.ts'
 
 /** How many background tasks one conversation may run at the same time. */
 export const REACT_MAX_PER_SESSION = 4
@@ -33,9 +35,29 @@ export interface ReactSession {
   submit(submission: { readonly type: 'input'; readonly content: string; readonly requestId?: string; readonly whenBusy?: 'steer' | 'followUp' | 'reject' }, context: Context): Promise<unknown>
 }
 
+/** The ticket that owns a worker conversation, as the durable reverse index records it. */
+export const reactOwnerKey = (conversationId: string) => KV.react.owner(conversationId)
+
+/** Read a worker conversation's owning ticket from the durable reverse index (written when the worker uses it). */
+export const ticketOfConversation = (store: { get<V>(key: Key<V>): V | undefined }, conversationId: string): string | undefined =>
+  store.get(KV.react.owner(conversationId))
+
+/** A finished background job's result, after it was successfully submitted into its conversation. */
+export interface ReactResultInput {
+  jobId: string
+  conversationId: string
+  /** The ticket that owns the conversation, when the durable reverse index knows it. */
+  ticketId?: string
+  content: string
+}
+
 export interface ReactDeps {
   /** Resolve the conversation that owns a job, to deliver its result as a new input message. */
   session(id: string): Promise<ReactSession | undefined>
+  /** Resolve the ticket that owns a conversation, so the result can re-enter the event flow if it has ended. */
+  ticketOf?(conversationId: string): string | undefined
+  /** Called after a result was successfully submitted into its conversation; failures never affect delivery. */
+  onResult?(input: ReactResultInput): void
   /** Job table to install; defaults to the process-wide `backgroundJobs`, which it binds to `session`. */
   jobs?: BackgroundJobs
   log?(message: string, detail?: unknown): void
@@ -103,6 +125,8 @@ export interface JobView {
 
 export interface BackgroundJobsDeps {
   session(id: string): Promise<ReactSession | undefined>
+  ticketOf?(conversationId: string): string | undefined
+  onResult?(input: ReactResultInput): void
   log(message: string, detail?: unknown): void
 }
 
@@ -247,10 +271,77 @@ export class BackgroundJobs {
       }
       await session.submit({ type: 'input', content, requestId: `react:${job.id}`, whenBusy: 'followUp' }, BACKGROUND_CONTEXT)
       deps.log('react result delivered', `${job.id} -> ${job.conversationId}`)
+      // The result is in the conversation now. A live ticket's turn will read it; an ended ticket needs
+      // the host's hook to put it back into the event flow. A hook failure must not undo the delivery.
+      try {
+        deps.onResult?.({ jobId: job.id, conversationId: job.conversationId, ticketId: deps.ticketOf?.(job.conversationId), content })
+      } catch (error) {
+        deps.log('react result hook failed', `${job.id}: ${String((error as Error)?.message ?? error)}`)
+      }
     } catch (error) {
       // The session may have ended or been aborted between start and exit; never crash the host.
       deps.log('react result delivery failed', `${job.id}: ${String((error as Error)?.message ?? error)}`)
     }
+  }
+}
+
+export interface ReactResultRequeueDeps {
+  /** The ticket the reverse index named, or undefined when it is unknown. */
+  ticket(id: string): Ticket | undefined
+  /** Every stored Thread, to find the one the ticket subscribed to. */
+  threads(): Thread[]
+  /** A previously stored Trigger, which makes repeated deliveries of one job idempotent. */
+  trigger(id: string): Trigger | undefined
+  /** The domain Engine's intake path (`Engine.receive`). */
+  receive(trigger: Trigger): unknown
+  log(message: string, detail?: unknown): void
+  now?(): string
+}
+
+/**
+ * The delivery hook: when a background result reached a conversation whose ticket has ended, submit the
+ * result to the domain as a new environment event. A live ticket needs nothing — its turn reads the
+ * message. The event is not human: an Eval decides whether the ended ticket should resume.
+ */
+export function requeueReactResult(deps: ReactResultRequeueDeps, input: ReactResultInput): void {
+  try {
+    const ticketId = input.ticketId
+    if (!ticketId) return
+    const ticket = deps.ticket(ticketId)
+    if (!ticket) {
+      deps.log('react result ignored', { jobId: input.jobId, ticketId })
+      return
+    }
+    // The turn that is still running (or waiting for its next wake) will read the submitted message.
+    if (liveTicket(ticket)) return
+    const triggerId = `react:${input.jobId}`
+    if (deps.trigger(triggerId)) {
+      deps.log('react result ignored', { jobId: input.jobId, ticketId })
+      return
+    }
+    const threads = deps.threads()
+    const thread = threads.find(item => item.subscriptions.includes(ticket.id) && !item.context?.includes(ticket.id))
+      ?? threads.find(item => item.subscriptions.includes(ticket.id))
+    if (!thread) {
+      deps.log('react result ignored', { jobId: input.jobId, ticketId, reason: 'no subscribed thread' })
+      return
+    }
+    const trigger: Trigger = {
+      id: triggerId,
+      source: 'react',
+      threads: [thread.ref],
+      // Senderless, like a CI event: the gate admits system events as inferred, never as a person's request.
+      actor: { source: 'react', id: '' },
+      human: false,
+      at: deps.now?.() ?? new Date().toISOString(),
+      text: input.content,
+      meta: { jobId: input.jobId, conversationId: input.conversationId, ticketId: ticket.id, background: true },
+    }
+    deps.receive(trigger)
+    deps.log('react result requeued', { jobId: input.jobId, triggerId, thread: threadKey(thread.ref) })
+  } catch (error) {
+    // A ticket or Thread may have changed between delivery and this lookup; never crash the host.
+    deps.log('react result requeue failed', `${input.jobId}: ${String((error as Error)?.message ?? error)}`)
   }
 }
 
@@ -310,7 +401,7 @@ export type ReactExtension = Extension & { readonly jobs: BackgroundJobs }
 /** Build the react extension (start/stop/list) against one job table. */
 export function createReactExtension(deps: ReactDeps): ReactExtension {
   const log = deps.log ?? (() => {})
-  const jobs = (deps.jobs ?? backgroundJobs).bind({ session: deps.session, log })
+  const jobs = (deps.jobs ?? backgroundJobs).bind({ session: deps.session, ticketOf: deps.ticketOf, onResult: deps.onResult, log })
   const conversationOf = (api: ToolExecutionApi<never>): string => String(api.conversationId)
 
   const start = defineTool({
