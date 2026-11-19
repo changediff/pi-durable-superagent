@@ -137,6 +137,9 @@ export interface BackgroundJobsDeps {
 export class BackgroundJobs {
   private readonly byId = new Map<string, Job>()
   private readonly byConversation = new Map<string, Set<string>>()
+  /** Deliveries in flight per conversation: a result submitted but not yet placed is not settled. */
+  private readonly deliveries = new Map<string, number>()
+  private readonly settledWaiters = new Map<string, Set<() => void>>()
   private counter = 0
   private deps: BackgroundJobsDeps | undefined
 
@@ -153,6 +156,52 @@ export class BackgroundJobs {
     return [...ids].map(id => this.byId.get(id)).filter((job): job is Job => !!job)
       .sort((a, b) => a.startedAt - b.startedAt)
       .map(job => ({ id: job.id, pid: job.pid, command: job.command, startedAt: job.startedAt }))
+  }
+
+  /**
+   * Resolve once the conversation runs no background job and every finished job's result has been
+   * submitted into it (a failed delivery counts as settled — it will never arrive). `signal` releases
+   * the waiter early, so a caller can enforce its own deadline without polling. Never rejects.
+   */
+  waitForSettled(conversationId: string, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted || this.isSettled(conversationId)) return Promise.resolve()
+    return new Promise(resolve => {
+      let waiters = this.settledWaiters.get(conversationId)
+      if (!waiters) {
+        waiters = new Set()
+        this.settledWaiters.set(conversationId, waiters)
+      }
+      const done = () => {
+        const current = this.settledWaiters.get(conversationId)
+        current?.delete(done)
+        if (current && !current.size) this.settledWaiters.delete(conversationId)
+        signal?.removeEventListener('abort', done)
+        resolve()
+      }
+      waiters.add(done)
+      signal?.addEventListener('abort', done, { once: true })
+    })
+  }
+
+  /** Whether a conversation has neither a running job nor a result delivery still being submitted. */
+  private isSettled(conversationId: string): boolean {
+    return !this.byConversation.has(conversationId) && !this.deliveries.has(conversationId)
+  }
+
+  /** Resolve the waiters once nothing is left to finish or deliver there. */
+  private notifySettled(conversationId: string): void {
+    if (!this.isSettled(conversationId)) return
+    const waiters = this.settledWaiters.get(conversationId)
+    if (!waiters) return
+    this.settledWaiters.delete(conversationId)
+    for (const done of waiters) done()
+  }
+
+  /** Track one result delivery in flight; a zero count is no delivery. */
+  private countDelivery(conversationId: string, delta: 1 | -1): void {
+    const count = (this.deliveries.get(conversationId) ?? 0) + delta
+    if (count > 0) this.deliveries.set(conversationId, count)
+    else this.deliveries.delete(conversationId)
   }
 
   /** Spawn a detached process group and return at once; the result is delivered on exit. */
@@ -243,9 +292,15 @@ export class BackgroundJobs {
     if (job.ended) return
     job.ended = true
     if (job.timer) clearTimeout(job.timer)
+    // Count the delivery before dropping the job, so a waiter never sees the conversation settled
+    // between the job leaving the table and its result being submitted.
+    if (!job.discarded) this.countDelivery(job.conversationId, 1)
     this.drop(job, job.discarded)
     if (job.discarded) return
-    void this.deliver(job)
+    void this.deliver(job).finally(() => {
+      this.countDelivery(job.conversationId, -1)
+      this.notifySettled(job.conversationId)
+    })
   }
 
   private drop(job: Job, discard: boolean): void {
@@ -256,6 +311,7 @@ export class BackgroundJobs {
     jobs?.delete(job.id)
     if (jobs && !jobs.size) this.byConversation.delete(job.conversationId)
     if (discard) killGroup(job.child)
+    this.notifySettled(job.conversationId)
   }
 
   /** Deliver the finished job's result as a new input message; a gone or aborted conversation fails quietly. */

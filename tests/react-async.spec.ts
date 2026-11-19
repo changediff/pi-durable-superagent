@@ -16,9 +16,12 @@ class FakeSession implements ReactSession {
   readonly submissions: { type: string; content: string; requestId?: string; whenBusy?: string }[] = []
   attempts = 0
   refuse = false
+  /** When set, submit waits for it before placing the input (to observe the delivery window). */
+  hold: Promise<void> | undefined
 
   async submit(submission: { type: 'input'; content: string; requestId?: string; whenBusy?: string }): Promise<{ id: string }> {
     this.attempts += 1
+    if (this.hold) await this.hold
     if (this.refuse) throw new Error('conversation aborted')
     this.submissions.push(submission)
     return { id: `sub-${this.submissions.length}` }
@@ -166,6 +169,21 @@ describe('the async react tools', () => {
     started(await start.execute({ command: 'echo ok' }, undefined, {}))
     await waitFor(() => session.attempts === 1, 'the delivery attempt')
     expect(session.submissions).toHaveLength(0) // refused, and no unhandled rejection crashed the test
+  })
+
+  it('reports a conversation settled only after the finished result was submitted', async () => {
+    const { start, session, jobs } = setup()
+    await jobs.waitForSettled('conv-1') // nothing running: resolved at once
+    let release!: () => void
+    session.hold = new Promise<void>(resolve => { release = resolve })
+    started(await start.execute({ command: 'echo ok' }, undefined, {}))
+    let settled = false
+    void jobs.waitForSettled('conv-1').then(() => { settled = true })
+    await waitFor(() => session.attempts === 1, 'the delivery attempt')
+    expect(settled).toBe(false) // the process ended, but its result is still on its way in
+    release()
+    await waitFor(() => settled, 'the conversation to settle')
+    expect(session.submissions).toHaveLength(1)
   })
 
   it('marks a timed-out task', async () => {

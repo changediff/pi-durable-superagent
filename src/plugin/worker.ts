@@ -14,7 +14,7 @@ import { configure, defineTask, type ConversationHandle, type ConversationId, ty
 import type { Context } from '@earendil-works/chord/context'
 import { liveTicket, runningAssignment, threadKey, type Engine, type Ticket, type Trigger } from '../core/index.ts'
 import { record } from '../kv.ts'
-import { backgroundJobs, reactOwnerKey } from './react.ts'
+import { backgroundJobs, reactOwnerKey, type JobView } from './react.ts'
 import type { Store } from '../app/store.ts'
 import type { ResolvedSuperagentConfig } from './config.ts'
 import { lastAssistantText } from './transcript.ts'
@@ -23,11 +23,22 @@ import { startWorkerWatchdog } from './watchdog.ts'
 /** How long a queued worker task waits between worker-slot checks. */
 const SLOT_POLL_MS = 1500
 
+/**
+ * The background-job surface the worker waits on: the jobs one conversation still runs, and a
+ * promise that settles once none runs and every finished result was submitted back into it.
+ */
+export interface WorkerBackgroundJobs {
+  jobsOf(conversationId: string): readonly JobView[]
+  waitForSettled(conversationId: string, signal?: AbortSignal): Promise<void>
+}
+
 export interface WorkerTaskDeps {
   readonly store: Store
   readonly cfg: ResolvedSuperagentConfig
   engine(): Engine
   bridges: WorkerBridges
+  /** Background-job table; defaults to the process-wide `backgroundJobs`. */
+  jobs?: WorkerBackgroundJobs
 }
 
 /** Input of one `superagent.worker` task: the assignment it runs. */
@@ -201,6 +212,8 @@ async function runWorker(deps: WorkerTaskDeps, task: WorkerTask, runtime: Worker
       cfg.log('worker started', `${ticketId}/${assignmentId} -> ${handle.id}`)
     }
     const brief = workerBrief(store, cfg, ticket)
+    // One budget for the whole worker turn, including any rounds resumed for background results.
+    const turnDeadline = runtime.now() + cfg.workerTurnTimeoutMs
     const submission = await handle.submit(
       { type: 'input', content: brief, requestId: `superagent:brief:${ticketId}:${assignmentId}` },
       context,
@@ -228,12 +241,23 @@ async function runWorker(deps: WorkerTaskDeps, task: WorkerTask, runtime: Worker
       await endConversation(handle, context, error => cfg.log('worker abort failed', String(error)))
       report(deps, ticketId, { state: 'failed', summary: `执行失败：${settled.summary}`.slice(0, 1000) })
     } else if (settled.value.status === 'done' && settled.value.type === 'input') {
-      const summary = await lastAssistantText(runtime, handle.id, context) || '已完成，但没有文本输出。'
-      cfg.log('worker finished', `${ticketId}: ${summary.length} chars`)
-      report(deps, ticketId, { state: 'ready', summary })
-      // The DSH build's main Session called orchestrator_reply; the plugin sends the result itself.
-      try { engine().reply({ purpose: 'result', ticketId, text: summary }) }
-      catch (error) { cfg.log('result reply refused', String((error as Error)?.message ?? error)) }
+      // A turn must not end while a background job it started is still running: its result would
+      // arrive into a conversation nobody is reading. Wait for each result round instead.
+      const background = await awaitBackgroundJobs(deps, ticketId, handle, runtime, context, stopped, turnDeadline)
+      if (background.kind === 'stopped') {
+        cfg.log('worker stopped', `${ticketId}: by the domain`)
+        await endConversation(handle, context, error => cfg.log('worker abort failed', String(error)))
+      } else {
+        if (background.turns > 0) cfg.log('worker resumed after background jobs', { ticketId, turns: background.turns })
+        const text = await lastAssistantText(runtime, handle.id, context) || '已完成，但没有文本输出。'
+        const note = backgroundNote(background.running)
+        const summary = note ? `${text}\n\n${note}` : text
+        cfg.log('worker finished', `${ticketId}: ${summary.length} chars`)
+        report(deps, ticketId, { state: 'ready', summary })
+        // The DSH build's main Session called orchestrator_reply; the plugin sends the result itself.
+        try { engine().reply({ purpose: 'result', ticketId, text: summary }) }
+        catch (error) { cfg.log('result reply refused', String((error as Error)?.message ?? error)) }
+      }
     } else if (!stopRequested) {
       const reason = 'reason' in settled.value ? ` (${String(settled.value.reason)})` : ''
       report(deps, ticketId, { state: 'failed', summary: `执行失败：worker turn ended as ${settled.value.status}${reason}`.slice(0, 1000) })
@@ -248,6 +272,51 @@ async function runWorker(deps: WorkerTaskDeps, task: WorkerTask, runtime: Worker
     bridges.release(ticketId)
     await runtime.commit(() => ({ status: 'terminal', outcome: { status: 'completed', result: null } }), context).catch(() => {})
   }
+}
+
+/**
+ * After a final answer, keep the turn open while the conversation still runs background jobs
+ * (react `start`). Each finished job's result is already submitted into the conversation as a new
+ * input — its own run reads it — so this waits for that run and then re-checks. Stops at the turn
+ * deadline, which the caller reports honestly instead of waiting forever.
+ */
+async function awaitBackgroundJobs(
+  deps: WorkerTaskDeps, ticketId: string, handle: ConversationHandle,
+  runtime: WorkerRuntime, context: Context, stopped: Promise<void>, deadline: number,
+): Promise<{ kind: 'settled' | 'stopped'; turns: number; running: readonly JobView[] }> {
+  const jobs = deps.jobs ?? backgroundJobs
+  const conversationId = String(handle.id)
+  let turns = 0
+  for (;;) {
+    const running = jobs.jobsOf(conversationId)
+    if (!running.length) return { kind: 'settled', turns, running: [] }
+    const left = deadline - runtime.now()
+    if (left <= 0) return { kind: 'settled', turns, running }
+    deps.cfg.log('worker waits for background jobs', {
+      ticketId, conversationId,
+      jobs: running.map(job => ({ id: job.id, command: job.command })),
+    })
+    // Wait on the job table's own event (no polling); a signal releases the waiter at the deadline.
+    const cancel = new AbortController()
+    const finished = await raceTurn(jobs.waitForSettled(conversationId, cancel.signal), stopped, left).finally(() => cancel.abort())
+    if (finished.kind === 'stopped') return { kind: 'stopped', turns, running: [] }
+    if (finished.kind !== 'settled') return { kind: 'settled', turns, running: jobs.jobsOf(conversationId) }
+    // The finished result was delivered as an input, which starts a run of its own. Wait for that
+    // run to end before checking whether it started further background work.
+    const idleLeft = deadline - runtime.now()
+    if (idleLeft <= 0) return { kind: 'settled', turns, running: jobs.jobsOf(conversationId) }
+    const resumed = await raceTurn(handle.waitForIdle(context).catch(() => {}), stopped, idleLeft)
+    if (resumed.kind === 'stopped') return { kind: 'stopped', turns, running: [] }
+    turns += 1
+    if (resumed.kind !== 'settled') return { kind: 'settled', turns, running: jobs.jobsOf(conversationId) }
+  }
+}
+
+/** The honest one-line tail of a result whose background jobs outlived the wait deadline. */
+function backgroundNote(running: readonly JobView[]): string {
+  if (!running.length) return ''
+  const list = running.map(job => `${job.id}「${job.command}」`).join('、')
+  return `[后台任务仍在运行] ${list}（已到达本轮等待截止时间，本轮先结束）`
 }
 
 /** Find (or create, task-owned) the ticket's worker conversation; reused across assignments and restarts. */
