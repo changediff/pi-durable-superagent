@@ -114,6 +114,10 @@ triggers are fed to the plugin via `ingest()` — and the outbound transport thr
 | `SUP_EVAL_MODE` | `auto` | `auto` / `observe` / `off` |
 | `SUP_MAX_WORKERS` | `3` | concurrent durable worker conversations |
 | `SUP_TURN_TIMEOUT_MS` | `1800000` | per-turn worker timeout |
+| `SUP_A2A` / `SUP_A2A_PORT` | off / `18802` | start the A2A server (see [009-a2a.md](009-a2a.md)) |
+| `SUP_A2A_TOKEN` | empty | bearer token; **empty accepts anyone** — always set it |
+| `SUP_A2A_PUBLIC_URL` | tailnet URL | URL published in the agent card |
+| `SUP_A2A_PEERS` | `[]` | JSON array `{name,url,token,timeout}` for the outbound `a2a_send` tool |
 
 ## Run
 
@@ -130,16 +134,35 @@ without Feishu; it exits 0 on a real reply and 1 on timeout.
 
 ```bash
 cd /root/playground/pi-durable-superagent
-docker build -f deploy/Dockerfile -t changediff/pi-agent:superagent-plugin .
+docker build -f deploy/Dockerfile -t changediff/pi-agent:superagent-plugin6 .
 bash deploy/docker-run.sh      # recreates the pi-agent container on the new image
 ```
 
-`/etc/piagent.env` must gain `ZHIPU_API_KEY` (and optionally the `SUP_*` overrides). Rollback:
+`/etc/piagent.env` must gain `ZHIPU_API_KEY` (and optionally the `SUP_*` overrides). Model routing
+(provider/model/base/key-env) now comes from `deploy/model.env`, which `docker-run.sh` sources — edit
+that file instead of the script. Rollback to the previous image tag:
 
 ```bash
-sed -i 's#changediff/pi-agent:superagent-plugin#changediff/pi-agent:superagent#' deploy/docker-run.sh
+sed -i 's#changediff/pi-agent:superagent-plugin6#changediff/pi-agent:superagent-plugin5#' deploy/docker-run.sh
 bash deploy/docker-run.sh
 ```
+
+## A2A and the fast path
+
+Two things shaped the current shape of the port:
+
+- **A2A** lets other agents hand work in and read answers out (`SendMessage` / `tasks/get`, bearer
+  token, agent card on `/.well-known/agent-card.json`). Peers configured on this host: cc2 Hermes,
+  deb01 Hermes, CowAgent (deb02). Setup, verified matrix and operations: [009-a2a.md](009-a2a.md).
+- **Passthrough (fast path).** `feishuThreadId` is `<chat>:<topic root>` for topic groups and
+  `<chat>:chat` for p2p / plain chats — *not* per message. A message that fans out to tickets already
+  subscribed to its Thread skips Eval entirely and is logged as
+  `passthrough {"triggerId","tickets","threads"}`, which is the number to watch when measuring how
+  much Router decision traffic the fast path removes. A2A `contextId` was already Thread-stable, so
+  A2A follow-ups always took this path.
+- A worker that decides a follow-up is not its task **hands back** (`handbacks` + `queueForEval`),
+  which re-queues the Trigger for Eval as soon as the last deciding ticket lets go — so passthrough
+  never strands a message.
 
 ## Known limits
 

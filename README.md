@@ -37,6 +37,19 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [006 Deployment](docs/006-deployment.md): manual setup, configuration, upgrades and troubleshooting
 - [007 Architecture](docs/007-architecture.md)
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
+- [009 A2A](docs/009-a2a.md): agent-to-agent endpoint, peers, verified matrix, operations
+
+## Port status
+
+| Area | State |
+|---|---|
+| Feishu source, Router/Worker, durable workers | ported and running (`superagent-plugin6`) |
+| A2A (inbound server + outbound `a2a_send`) | done; peers cc2 Hermes, deb01 Hermes, CowAgent — both directions verified |
+| Passthrough / fast path (`passthrough` log) | done; conversation-level Threads |
+| Watchdog (model-level supervision of a worker) | next — only the heartbeat exists today |
+| Async ReAct (`start`/`stop` tool pair) | not started |
+| Chained recall / inline & spill | not started |
+| On-device daemon (BYOM) | not started |
 
 ## Development
 
