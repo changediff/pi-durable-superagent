@@ -44,6 +44,10 @@ export const ConfigSchema = z.object({
   feishuAppId: z.string().default(''),
   feishuAppSecret: z.string().default(''),
   feishuDomain: z.enum(['feishu', 'lark']),
+  /** Outbound markdown rendering: rich post / interactive card by content, or plain text. */
+  feishuRenderMode: z.enum(['auto', 'post', 'card', 'text']),
+  /** Character chunk limit for outbound messages (the envelope byte limit is enforced separately). */
+  feishuChunkLimit: z.number().int().positive(),
   /** Every human sender is allowed when true; otherwise only `allowedOpenIds` may originate work. */
   allowAll: z.boolean(),
   allowedOpenIds: z.array(z.string()),
@@ -137,6 +141,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     feishuAppId: env.FEISHU_APP_ID || '',
     feishuAppSecret: env.FEISHU_APP_SECRET || '',
     feishuDomain: env.FEISHU_DOMAIN === 'lark' ? 'lark' : 'feishu',
+    feishuRenderMode: renderMode(env.FEISHU_RENDER_MODE),
+    feishuChunkLimit: Number(env.FEISHU_CHUNK_LIMIT || 7000),
     allowAll: truthy(env.SUP_ALLOW_ALL),
     allowedOpenIds: csv(env.SUP_ALLOWED_OPEN_IDS || env.FEISHU_ALLOWED_OPEN_IDS),
     listenAllChats: truthy(env.SUP_LISTEN_ALL_CHATS),
@@ -177,6 +183,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 /** `SUP_WATCHDOG` value to mode; unset and unrecognised values keep the watchdog off. */
 function watchdogMode(value: string | undefined): Config['watchdog']['mode'] {
   return value === 'observe' || value === 'auto' ? value : 'off'
+}
+
+/** `FEISHU_RENDER_MODE` value to mode; unset and unrecognised values stay automatic. */
+function renderMode(value: string | undefined): Config['feishuRenderMode'] {
+  return value === 'post' || value === 'card' || value === 'text' ? value : 'auto'
 }
 
 /** `SUP_A2A_PEERS` JSON array; a parse failure yields no peers instead of failing startup. */

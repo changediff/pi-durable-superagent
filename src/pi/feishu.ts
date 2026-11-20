@@ -10,9 +10,9 @@ import * as lark from '@larksuiteoapi/node-sdk'
 import type { ChannelRef, OutboundMessage, Trigger } from '../core/index.ts'
 import type { ScopeResult, SourceScope } from '../core/index.ts'
 import type { Config } from './config.ts'
+import { FEISHU_ENVELOPE_MAX_BYTES, chunkFeishuText, renderFeishuMessage } from './feishu-format.ts'
 
 const SOURCE = 'feishu'
-const MAX_CHUNK = 7000
 
 export interface FeishuHost {
   /** Called for every admissible chat message; the runtime stores it as a Trigger. */
@@ -86,14 +86,17 @@ export class FeishuSource implements SourceScope {
   async send(message: OutboundMessage): Promise<'sent' | 'gone' | 'waiting'> {
     const chatId = message.channel.address.chatId
     const messageId = message.channel.address.messageId
-    const chunks = splitText(message.text ?? '')
-    for (const chunk of chunks) {
-      const content = JSON.stringify({ text: chunk })
+    const mode = this.cfg.feishuRenderMode
+    const render = (chunk: string) => renderFeishuMessage(chunk, mode)
+    // Chunks are measured through the real envelope: wrappers, JSON escapes and UTF-8 all count.
+    const chunks = chunkFeishuText(message.text ?? '', { charLimit: this.cfg.feishuChunkLimit, byteLimit: FEISHU_ENVELOPE_MAX_BYTES }, chunk => render(chunk).content)
+    for (const chunk of chunks.length > 0 ? chunks : ['']) {
+      const { msgType, content } = render(chunk)
       try {
         if (messageId) {
-          await this.client.im.message.reply({ path: { message_id: messageId }, data: { content, msg_type: 'text' } })
+          await this.client.im.message.reply({ path: { message_id: messageId }, data: { content, msg_type: msgType } })
         } else if (chatId) {
-          await this.client.im.message.create({ params: { receive_id_type: 'chat_id' }, data: { receive_id: chatId, msg_type: 'text', content } })
+          await this.client.im.message.create({ params: { receive_id_type: 'chat_id' }, data: { receive_id: chatId, msg_type: msgType, content } })
         } else {
           return 'gone'
         }
@@ -101,7 +104,7 @@ export class FeishuSource implements SourceScope {
         const detail = String((error as { message?: string })?.message ?? error)
         if (/recall|deleted|not\s*found|invalid\s*message/i.test(detail)) {
           if (chatId) {
-            await this.client.im.message.create({ params: { receive_id_type: 'chat_id' }, data: { receive_id: chatId, msg_type: 'text', content } })
+            await this.client.im.message.create({ params: { receive_id_type: 'chat_id' }, data: { receive_id: chatId, msg_type: msgType, content } })
             continue
           }
           return 'gone'
@@ -110,6 +113,10 @@ export class FeishuSource implements SourceScope {
         return 'waiting'
       }
     }
+    const rendered = (chunks.length > 0 ? chunks : ['']).map(chunk => render(chunk))
+    const bytes = rendered.reduce((sum, item) => sum + Buffer.byteLength(item.content, 'utf8'), 0)
+    const types = [...new Set(rendered.map(item => item.msgType))]
+    this.host.log('feishu send', { msgType: types.join('+'), bytes, chunks: rendered.length })
     return 'sent'
   }
 
@@ -144,11 +151,4 @@ export class FeishuSource implements SourceScope {
     }
     this.host.onTrigger(trigger)
   }
-}
-
-function splitText(text: string): string[] {
-  if (text.length <= MAX_CHUNK) return [text]
-  const chunks: string[] = []
-  for (let index = 0; index < text.length; index += MAX_CHUNK) chunks.push(text.slice(index, index + MAX_CHUNK))
-  return chunks
 }
